@@ -416,3 +416,338 @@ def test_outbox_tick_sql_excludes_non_running_campaign_statuses():
     """Garante que o SELECT principal do tick continua a filtrar só campanhas activas."""
     src = Path(_REPO, "worker_message_outbox.py").read_text(encoding="utf-8")
     assert "AND c.status IN ('running', 'pending')" in src
+    assert "waiting_instance" in src
+
+
+def test_normalize_uazapi_send_result_structured_failure_not_success():
+    import worker_message_outbox as wmo
+
+    failure = {
+        "uazapi_request_failed": True,
+        "http_status": 400,
+        "error_body": {"message": "bad request"},
+    }
+    norm = wmo._normalize_uazapi_send_result(failure)
+    assert norm["success"] is False
+    assert norm["http_status"] == 400
+    assert norm["result_json_classify"]["uazapi_request_failed"] is True
+
+
+def test_normalize_uazapi_send_result_none_legacy_not_success():
+    import worker_message_outbox as wmo
+
+    norm = wmo._normalize_uazapi_send_result(None)
+    assert norm["success"] is False
+    assert norm["http_status"] is None
+    assert norm["result_json_classify"]["reason"] == "empty_response"
+
+
+def test_persist_outcome_structured_400_marks_failed_terminal(
+    db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch
+):
+    _reload_outbox_modules(monkeypatch, True)
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, leads = _insert_campaign_with_leads(
+        db_conn, user_id=uid, instance_id=iid, n_leads=1, name="structured 400"
+    )
+    from psycopg2.extras import RealDictCursor
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO campaign_message_outbox (
+                campaign_id, campaign_lead_id, instance_id,
+                stage, step_priority, status, queued_at, next_run_at,
+                idempotency_key, payload_summary
+            )
+            VALUES (%s, %s, %s, 'initial', 0, 'sending', NOW(), NOW(),
+                    %s, '{}'::jsonb)
+            RETURNING id
+            """,
+            (cid, leads[0], iid, f"campaign-{cid}-lead-{leads[0]}-struct400"),
+        )
+        oid = int(cur.fetchone()[0])
+        db_conn.commit()
+
+    import worker_message_outbox as wmo
+
+    structured = {
+        "uazapi_request_failed": True,
+        "http_status": 400,
+        "error_body": {"error": "invalid number"},
+    }
+    norm = wmo._normalize_uazapi_send_result(structured)
+    wmo._persist_outcome(
+        db_conn,
+        outbox_id=oid,
+        campaign_id=cid,
+        lead_id=leads[0],
+        chosen=_chosen_minimal(user_id=uid, instance_id=iid),
+        http_status=norm["http_status"],
+        response_body=norm["response_body"],
+        outcome="failed",
+        latency_ms=3,
+        success=False,
+        track_from_response=None,
+        audit_request={"kind": "text"},
+        audit_response_body=norm["audit_response_body"],
+    )
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT status FROM campaign_message_outbox WHERE id = %s", (oid,))
+        assert cur.fetchone()["status"] == "failed"
+        cur.execute(
+            "SELECT outcome FROM campaign_send_attempts WHERE outbox_id = %s ORDER BY attempt_no DESC LIMIT 1",
+            (oid,),
+        )
+        assert cur.fetchone()["outcome"] == "failed_terminal"
+
+
+def test_persist_outcome_max_attempts_marks_failed_max_attempts(
+    db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch
+):
+    monkeypatch.setenv("UAZAPI_OUTBOX_MAX_ATTEMPTS", "3")
+    _reload_outbox_modules(monkeypatch, True)
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, leads = _insert_campaign_with_leads(
+        db_conn, user_id=uid, instance_id=iid, n_leads=1, name="max attempts"
+    )
+    from psycopg2.extras import RealDictCursor
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO campaign_message_outbox (
+                campaign_id, campaign_lead_id, instance_id,
+                stage, step_priority, status, queued_at, next_run_at,
+                idempotency_key, payload_summary
+            )
+            VALUES (%s, %s, %s, 'initial', 0, 'sending', NOW(), NOW(),
+                    %s, '{}'::jsonb)
+            RETURNING id
+            """,
+            (cid, leads[0], iid, f"campaign-{cid}-lead-{leads[0]}-maxatt"),
+        )
+        oid = int(cur.fetchone()[0])
+        for n in (1, 2):
+            cur.execute(
+                """
+                INSERT INTO campaign_send_attempts
+                    (outbox_id, attempt_no, http_status, uazapi_response, outcome, latency_ms, finished_at)
+                VALUES (%s, %s, 503, '{}', 'retry_scheduled', 1, NOW())
+                """,
+                (oid, n),
+            )
+        db_conn.commit()
+
+    import worker_message_outbox as wmo
+
+    wmo._persist_outcome(
+        db_conn,
+        outbox_id=oid,
+        campaign_id=cid,
+        lead_id=leads[0],
+        chosen=_chosen_minimal(user_id=uid, instance_id=iid),
+        http_status=503,
+        response_body=json.dumps({"message": "Service Unavailable"}),
+        outcome="failed",
+        latency_ms=5,
+        success=False,
+        track_from_response=None,
+        audit_request={"kind": "text"},
+        audit_response_body={"uazapi_request_failed": True, "http_status": 503},
+    )
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT status FROM campaign_message_outbox WHERE id = %s", (oid,))
+        assert cur.fetchone()["status"] == "failed"
+        cur.execute(
+            "SELECT outcome FROM campaign_send_attempts WHERE outbox_id = %s ORDER BY attempt_no DESC LIMIT 1",
+            (oid,),
+        )
+        assert cur.fetchone()["outcome"] == "failed_max_attempts"
+
+
+def test_persist_outcome_instance_unreachable_sets_waiting_instance(
+    db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch
+):
+    _reload_outbox_modules(monkeypatch, True)
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, leads = _insert_campaign_with_leads(
+        db_conn, user_id=uid, instance_id=iid, n_leads=1, name="instance unreachable"
+    )
+    from psycopg2.extras import RealDictCursor
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO campaign_message_outbox (
+                campaign_id, campaign_lead_id, instance_id,
+                stage, step_priority, status, queued_at, next_run_at,
+                idempotency_key, payload_summary
+            )
+            VALUES (%s, %s, %s, 'initial', 0, 'sending', NOW(), NOW(),
+                    %s, '{}'::jsonb)
+            RETURNING id
+            """,
+            (cid, leads[0], iid, f"campaign-{cid}-lead-{leads[0]}-unreach"),
+        )
+        oid = int(cur.fetchone()[0])
+        db_conn.commit()
+
+    import worker_message_outbox as wmo
+
+    norm = wmo._normalize_uazapi_send_result(None)
+    wmo._persist_outcome(
+        db_conn,
+        outbox_id=oid,
+        campaign_id=cid,
+        lead_id=leads[0],
+        chosen=_chosen_minimal(user_id=uid, instance_id=iid),
+        http_status=norm["http_status"],
+        response_body=norm["response_body"],
+        outcome="failed",
+        latency_ms=4,
+        success=False,
+        track_from_response=None,
+        audit_request={"kind": "text"},
+        audit_response_body=norm["audit_response_body"],
+    )
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT status FROM campaign_message_outbox WHERE id = %s", (oid,))
+        assert cur.fetchone()["status"] == "waiting_instance"
+        cur.execute(
+            "SELECT outcome FROM campaign_send_attempts WHERE outbox_id = %s ORDER BY attempt_no DESC LIMIT 1",
+            (oid,),
+        )
+        assert cur.fetchone()["outcome"] == "retry_scheduled"
+
+
+def test_persist_outcome_audit_contains_failure_kind(
+    db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
+    _reload_outbox_modules(monkeypatch, True)
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, leads = _insert_campaign_with_leads(
+        db_conn, user_id=uid, instance_id=iid, n_leads=1, name="audit failure_kind"
+    )
+    from psycopg2.extras import RealDictCursor
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO campaign_message_outbox (
+                campaign_id, campaign_lead_id, instance_id,
+                stage, step_priority, status, queued_at, next_run_at,
+                idempotency_key, payload_summary
+            )
+            VALUES (%s, %s, %s, 'initial', 0, 'sending', NOW(), NOW(),
+                    %s, '{}'::jsonb)
+            RETURNING id
+            """,
+            (cid, leads[0], iid, f"campaign-{cid}-lead-{leads[0]}-audit"),
+        )
+        oid = int(cur.fetchone()[0])
+        db_conn.commit()
+
+    import worker_message_outbox as wmo
+
+    structured = {
+        "uazapi_request_failed": True,
+        "http_status": 503,
+        "error_body": {"message": "down"},
+    }
+    norm = wmo._normalize_uazapi_send_result(structured)
+    wmo._persist_outcome(
+        db_conn,
+        outbox_id=oid,
+        campaign_id=cid,
+        lead_id=leads[0],
+        chosen=_chosen_minimal(user_id=uid, instance_id=iid),
+        http_status=norm["http_status"],
+        response_body=norm["response_body"],
+        outcome="failed",
+        latency_ms=6,
+        success=False,
+        track_from_response=None,
+        audit_request={"kind": "text"},
+        audit_response_body=norm["audit_response_body"],
+    )
+
+    import utils.campaign_dispatch_audit as cda
+
+    path = cda.dispatch_audit_jsonl_path(uid, cid, ensure_parent=False)
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines
+    ev = json.loads(lines[-1])
+    assert ev["failure_kind"] == "retry_backoff"
+    assert ev.get("error_summary")
+    assert ev.get("max_attempts") == wmo._OUTBOX_MAX_ATTEMPTS
+
+
+def test_outbox_tick_structured_uazapi_failure_not_marked_sent(
+    db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch
+):
+    """Dict de erro estruturado (truthy) não deve ser interpretado como sucesso no tick."""
+    _reload_outbox_modules(monkeypatch, True)
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, leads = _insert_campaign_with_leads(
+        db_conn, user_id=uid, instance_id=iid, n_leads=1, name="tick structured fail"
+    )
+    from psycopg2.extras import RealDictCursor
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO campaign_message_outbox (
+                campaign_id, campaign_lead_id, instance_id,
+                stage, step_priority, status, queued_at, next_run_at,
+                idempotency_key, payload_summary
+            )
+            VALUES (%s, %s, %s, 'initial', 0, 'pending', NOW(), NOW(),
+                    %s, '{}'::jsonb)
+            RETURNING id
+            """,
+            (cid, leads[0], iid, f"campaign-{cid}-lead-{leads[0]}-tickfail"),
+        )
+        oid = int(cur.fetchone()[0])
+        db_conn.commit()
+
+    import worker_message_outbox as wmo
+
+    structured_fail = {
+        "uazapi_request_failed": True,
+        "http_status": 503,
+        "error_body": {"message": "Service Unavailable"},
+    }
+    with patch.object(wmo, "is_campaign_send_window", return_value=True):
+        with patch.object(
+            wmo.uazapi_service,
+            "send_text_idempotent",
+            return_value=structured_fail,
+        ):
+            with patch("utils.limits.check_initial_chunk_daily_quota_for_campaign", return_value=True):
+                wmo.process_message_outbox_tick(db_conn)
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT status FROM campaign_message_outbox WHERE id = %s", (oid,))
+        st = cur.fetchone()["status"]
+        assert st in ("pending", "waiting_instance")
+        cur.execute(
+            "SELECT outcome, http_status FROM campaign_send_attempts WHERE outbox_id = %s ORDER BY attempt_no DESC LIMIT 1",
+            (oid,),
+        )
+        row = cur.fetchone()
+        assert row["outcome"] == "retry_scheduled"
+        assert row["http_status"] == 503
+
+    monkeypatch.delenv("USE_MESSAGE_OUTBOX", raising=False)
+    importlib.reload(__import__("utils.config", fromlist=["cfg"]))
+    importlib.reload(__import__("worker_message_outbox", fromlist=["wmo"]))

@@ -73,6 +73,10 @@ _OUTBOX_STALE_PENDING_TTL_MINUTES = int(
 )
 _OUTBOX_RETRY_BASE_SEC = int(os.environ.get("UAZAPI_OUTBOX_RETRY_BASE_SECONDS", "30"))
 _OUTBOX_RETRY_MAX_SEC = int(os.environ.get("UAZAPI_OUTBOX_RETRY_MAX_SECONDS", "3600"))
+_OUTBOX_MAX_ATTEMPTS = max(
+    1,
+    int(os.environ.get("UAZAPI_OUTBOX_MAX_ATTEMPTS", "8")),
+)
 
 
 def _outbox_retry_backoff_seconds(attempt_no: int) -> int:
@@ -95,6 +99,112 @@ def _result_json_for_classify(
         except Exception:
             pass
     return None
+
+
+def _normalize_uazapi_send_result(result_json: Any) -> dict[str, Any]:
+    """
+    Separa sucesso vs falha estruturada Uazapi para persistência e classificação.
+    Dict com ``uazapi_request_failed`` nunca é tratado como sucesso (truthy).
+    """
+    if result_json is None:
+        legacy_failure = {
+            "uazapi_request_failed": True,
+            "reason": "empty_response",
+            "error_body": {"message": "Uazapi returned no response"},
+        }
+        return {
+            "success": False,
+            "http_status": None,
+            "response_body": json.dumps(legacy_failure, ensure_ascii=False),
+            "audit_response_body": legacy_failure,
+            "result_json_classify": legacy_failure,
+            "exception_class_name": None,
+        }
+    if not isinstance(result_json, dict):
+        body = json.dumps({"raw": str(result_json)[:2000]}, ensure_ascii=False)
+        return {
+            "success": False,
+            "http_status": None,
+            "response_body": body,
+            "audit_response_body": str(result_json)[:4000],
+            "result_json_classify": None,
+            "exception_class_name": None,
+        }
+    if result_json.get("uazapi_request_failed"):
+        http_status: Optional[int] = None
+        raw_status = result_json.get("http_status")
+        if raw_status is not None:
+            try:
+                http_status = int(raw_status)
+            except (TypeError, ValueError):
+                http_status = None
+        response_body = json.dumps(result_json, ensure_ascii=False)
+        return {
+            "success": False,
+            "http_status": http_status,
+            "response_body": response_body,
+            "audit_response_body": result_json,
+            "result_json_classify": result_json,
+            "exception_class_name": result_json.get("exception"),
+        }
+    response_body = json.dumps(result_json, ensure_ascii=False)
+    return {
+        "success": True,
+        "http_status": 200,
+        "response_body": response_body,
+        "audit_response_body": result_json,
+        "result_json_classify": result_json,
+        "exception_class_name": None,
+    }
+
+
+def _error_summary_from_send_failure(
+    *,
+    http_status: Optional[int],
+    response_body: Optional[str],
+    result_json: Any,
+    failure_kind: Optional[str],
+) -> str:
+    """Resumo curto para auditoria JSONL (sem token)."""
+    parts: list[str] = []
+    if failure_kind:
+        parts.append(str(failure_kind))
+    if http_status is not None:
+        parts.append(f"HTTP {http_status}")
+    if isinstance(result_json, dict):
+        reason = result_json.get("reason")
+        if reason:
+            parts.append(str(reason))
+        eb = result_json.get("error_body")
+        if isinstance(eb, dict):
+            msg = eb.get("message") or eb.get("error") or eb.get("Message")
+            if msg:
+                parts.append(str(msg)[:200])
+        elif isinstance(eb, str) and eb.strip():
+            parts.append(eb.strip()[:200])
+        exc = result_json.get("exception") or result_json.get("exception_message")
+        if exc:
+            parts.append(str(exc)[:120])
+    elif response_body and response_body not in _INTERNAL_TERMINAL_MARKERS:
+        parts.append(str(response_body)[:200])
+    return " · ".join(parts) if parts else "send failed"
+
+
+_INTERNAL_TERMINAL_MARKERS = frozenset({"missing_phone", "missing_message_template"})
+
+
+def _count_retry_scheduled_attempts(conn, outbox_id: int) -> int:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM campaign_send_attempts
+            WHERE outbox_id = %s AND outcome = 'retry_scheduled'
+            """,
+            (outbox_id,),
+        )
+        row = cur.fetchone() or {}
+    return int(row.get("n") or 0)
 
 
 def _parse_message_template(raw: Any) -> list[str]:
@@ -320,7 +430,7 @@ def _defer_pending_initial_rows_to_next_window(
                 """
                 UPDATE campaign_message_outbox
                 SET next_run_at = %s, updated_at = NOW()
-                WHERE id = %s AND status = 'pending'
+                WHERE id = %s AND status IN ('pending', 'waiting_instance')
                 """,
                 (next_at, oid),
             )
@@ -391,7 +501,7 @@ def _recover_stale_pending_initial_outbox(conn, *, max_rows: int = 100) -> int:
                 """
                 UPDATE campaign_message_outbox
                 SET next_run_at = %s, updated_at = NOW()
-                WHERE id = %s AND status = 'pending'
+                WHERE id = %s AND status IN ('pending', 'waiting_instance')
                 """,
                 (nv, oid),
             )
@@ -474,7 +584,7 @@ def _reconcile_initial_outbox_in_flight(
                 """
                 UPDATE campaign_message_outbox
                 SET next_run_at = %s, updated_at = NOW()
-                WHERE id = %s AND status = 'pending'
+                WHERE id = %s AND status IN ('pending', 'waiting_instance')
                 """,
                 (nv, oid),
             )
@@ -1538,7 +1648,7 @@ def process_message_outbox_tick(conn) -> None:
             JOIN campaigns c ON c.id = o.campaign_id
             JOIN campaign_leads cl ON cl.id = o.campaign_lead_id
             JOIN instances i ON i.id = o.instance_id
-            WHERE o.status = 'pending'
+            WHERE o.status IN ('pending', 'waiting_instance')
               AND o.next_run_at <= NOW()
               AND c.status IN ('running', 'pending')
               AND (c.scheduled_start IS NULL OR c.scheduled_start <= NOW())
@@ -1604,7 +1714,7 @@ def process_message_outbox_tick(conn) -> None:
             cur.execute(
                 """
                 SELECT id, status FROM campaign_message_outbox
-                WHERE id = %s AND status = 'pending'
+                WHERE id = %s AND status IN ('pending', 'waiting_instance')
                 FOR UPDATE SKIP LOCKED
                 """,
                 (outbox_id,),
@@ -1617,7 +1727,7 @@ def process_message_outbox_tick(conn) -> None:
                 """
                 UPDATE campaign_message_outbox
                 SET status = 'sending', updated_at = NOW()
-                WHERE id = %s AND status = 'pending'
+                WHERE id = %s AND status IN ('pending', 'waiting_instance')
                 """,
                 (outbox_id,),
             )
@@ -1697,8 +1807,10 @@ def process_message_outbox_tick(conn) -> None:
             track_id=track_id,
             track_source=track_source,
         )
-        http_status = 200 if result_json else None
-        response_body = json.dumps(result_json) if result_json else None
+        normalized = _normalize_uazapi_send_result(result_json)
+        http_status = normalized["http_status"]
+        response_body = normalized["response_body"]
+        audit_response_body = normalized["audit_response_body"]
     else:
         if not message.strip():
             latency_ms = int((time.monotonic() - started) * 1000)
@@ -1737,11 +1849,13 @@ def process_message_outbox_tick(conn) -> None:
             track_id=track_id,
             track_source=track_source,
         )
-        http_status = 200 if result_json else None
-        response_body = json.dumps(result_json) if result_json else None
+        normalized = _normalize_uazapi_send_result(result_json)
+        http_status = normalized["http_status"]
+        response_body = normalized["response_body"]
+        audit_response_body = normalized["audit_response_body"]
 
     latency_ms = int((time.monotonic() - started) * 1000)
-    success = bool(result_json)
+    success = normalized["success"]
 
     _persist_outcome(
         conn,
@@ -1754,9 +1868,9 @@ def process_message_outbox_tick(conn) -> None:
         outcome="sent" if success else "failed",
         latency_ms=latency_ms,
         success=success,
-        track_from_response=(result_json or None),
+        track_from_response=normalized["result_json_classify"] if success else None,
         audit_request=audit_request,
-        audit_response_body=result_json if isinstance(result_json, dict) else _truncate(response_body, 4000),
+        audit_response_body=audit_response_body,
     )
 
 
@@ -1802,6 +1916,8 @@ def _persist_outcome(
         attempt_no = int((cur.fetchone() or {}).get("m") or 0) + 1
 
     result_json_classify = _result_json_for_classify(response_body, audit_response_body)
+    failure_kind: Optional[str] = None
+    next_retry_at_iso: Optional[str] = None
     if success:
         attempt_row_outcome = outcome
     else:
@@ -1811,11 +1927,28 @@ def _persist_outcome(
             result_json_classify,
             None,
         )
-        attempt_row_outcome = (
-            "failed_terminal"
-            if kind == "terminal"
-            else "retry_scheduled"
+        failure_kind = kind
+        if kind == "terminal":
+            attempt_row_outcome = "failed_terminal"
+        elif kind == "instance_unreachable":
+            attempt_row_outcome = "retry_scheduled"
+        else:
+            prior_retries = _count_retry_scheduled_attempts(conn, outbox_id)
+            if prior_retries >= _OUTBOX_MAX_ATTEMPTS - 1:
+                attempt_row_outcome = "failed_max_attempts"
+            else:
+                attempt_row_outcome = "retry_scheduled"
+
+    error_summary = (
+        None
+        if success
+        else _error_summary_from_send_failure(
+            http_status=http_status,
+            response_body=response_body,
+            result_json=result_json_classify,
+            failure_kind=failure_kind,
         )
+    )
 
     try:
         with conn.cursor() as cur:
@@ -1879,7 +2012,7 @@ def _persist_outcome(
                     (delta_sec, campaign_id, outbox_id),
                 )
             else:
-                if attempt_row_outcome == "failed_terminal":
+                if attempt_row_outcome in ("failed_terminal", "failed_max_attempts"):
                     cur.execute(
                         """
                         UPDATE campaign_message_outbox
@@ -1891,15 +2024,23 @@ def _persist_outcome(
                     )
                 else:
                     delay_sec = _outbox_retry_backoff_seconds(attempt_no)
+                    outbox_status = (
+                        "waiting_instance"
+                        if failure_kind == "instance_unreachable"
+                        else "pending"
+                    )
+                    next_retry_at_iso = (
+                        datetime.utcnow() + timedelta(seconds=delay_sec)
+                    ).isoformat() + "Z"
                     cur.execute(
                         """
                         UPDATE campaign_message_outbox
-                        SET status = 'pending',
+                        SET status = %s,
                             next_run_at = NOW() + (%s * INTERVAL '1 second'),
                             updated_at = NOW()
                         WHERE id = %s
                         """,
-                        (delay_sec, outbox_id),
+                        (outbox_status, delay_sec, outbox_id),
                     )
 
         conn.commit()
@@ -1928,6 +2069,10 @@ def _persist_outcome(
                         "outcome": attempt_row_outcome,
                         "latency_ms": latency_ms,
                         "http_status": http_status,
+                        "failure_kind": failure_kind,
+                        "error_summary": error_summary,
+                        "max_attempts": _OUTBOX_MAX_ATTEMPTS,
+                        "next_retry_at": next_retry_at_iso,
                         "request": audit_request or {},
                         "response": audit_response_body
                         if audit_response_body is not None

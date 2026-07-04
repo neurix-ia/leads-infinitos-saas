@@ -28,6 +28,38 @@ def _parse_timeout_seconds(
     return max(minimum, min(maximum, v))
 
 
+def _parse_error_body_from_response(response: requests.Response) -> Any:
+    """Extrai corpo de erro JSON ou texto truncado de uma resposta HTTP."""
+    try:
+        return response.json()
+    except Exception:
+        return {"raw": (getattr(response, "text", None) or "")[:8000]}
+
+
+def _uazapi_request_failure(
+    *,
+    http_status: Optional[int] = None,
+    error_body: Any = None,
+    exception: Optional[BaseException] = None,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Dict de falha estruturada — paridade com ``create_advanced_campaign`` e
+    ``classify_outbox_send_failure`` no worker outbox.
+    """
+    payload: dict[str, Any] = {"uazapi_request_failed": True}
+    if http_status is not None:
+        payload["http_status"] = http_status
+    if error_body is not None:
+        payload["error_body"] = error_body
+    if exception is not None:
+        payload["exception"] = type(exception).__name__
+        payload["exception_message"] = str(exception)[:2000]
+    if reason:
+        payload["reason"] = reason
+    return payload
+
+
 def _resolve_media_file_value(file: str) -> Optional[str]:
     """
     Converte path local em data URL base64; mantém URL/http/data: como estão.
@@ -273,15 +305,33 @@ class UazapiService:
                 url, json=payload, headers=headers, timeout=timeout_seconds
             )
             if response.status_code != 200:
+                err_body = _parse_error_body_from_response(response)
                 print(f"❌ [Uazapi] send_text_idempotent Status: {response.status_code}")
                 print(f"❌ [Uazapi] send_text_idempotent Body: {response.text}")
-            response.raise_for_status()
+                return _uazapi_request_failure(
+                    http_status=response.status_code,
+                    error_body=err_body,
+                )
             return response.json()
         except requests.exceptions.RequestException as e:
             print(f"❌ [Uazapi] Error send_text_idempotent: {e}")
+            status = None
+            err_body: Any = None
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
-            return None
+                try:
+                    status = e.response.status_code
+                except Exception:
+                    status = None
+                try:
+                    err_body = e.response.json()
+                except Exception:
+                    err_body = (getattr(e.response, "text", None) or str(e))[:4000]
+            return _uazapi_request_failure(
+                http_status=status,
+                error_body=err_body,
+                exception=e,
+            )
 
     def send_media(
         self,
@@ -306,7 +356,10 @@ class UazapiService:
 
         file_value = _resolve_media_file_value(file)
         if file_value is None:
-            return None
+            return _uazapi_request_failure(
+                reason="media_file_not_found",
+                error_body={"file": file, "message": "media file not found or unreadable"},
+            )
 
         payload: dict[str, Any] = {
             "number": number,
@@ -320,15 +373,33 @@ class UazapiService:
                 url, json=payload, headers=headers, timeout=30
             )
             if response.status_code != 200:
+                err_body = _parse_error_body_from_response(response)
                 print(f"❌ [Uazapi] send_media Status: {response.status_code}")
                 print(f"❌ [Uazapi] send_media Body: {response.text}")
-            response.raise_for_status()
+                return _uazapi_request_failure(
+                    http_status=response.status_code,
+                    error_body=err_body,
+                )
             return response.json()
         except requests.exceptions.RequestException as e:
             print(f"❌ [Uazapi] Error sending media: {e}")
+            status = None
+            err_body: Any = None
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
-            return None
+                try:
+                    status = e.response.status_code
+                except Exception:
+                    status = None
+                try:
+                    err_body = e.response.json()
+                except Exception:
+                    err_body = (getattr(e.response, "text", None) or str(e))[:4000]
+            return _uazapi_request_failure(
+                http_status=status,
+                error_body=err_body,
+                exception=e,
+            )
 
     def send_media_campaign(
         self,
@@ -354,7 +425,10 @@ class UazapiService:
 
         file_value = _resolve_media_file_value(file)
         if file_value is None:
-            return None
+            return _uazapi_request_failure(
+                reason="media_file_not_found",
+                error_body={"file": file, "message": "media file not found or unreadable"},
+            )
 
         timeout = timeout_seconds
         if timeout is None:
@@ -376,15 +450,33 @@ class UazapiService:
                 url, json=payload, headers=headers, timeout=timeout
             )
             if response.status_code != 200:
+                err_body = _parse_error_body_from_response(response)
                 print(f"❌ [Uazapi] send_media_campaign Status: {response.status_code}")
                 print(f"❌ [Uazapi] send_media_campaign Body: {response.text}")
-            response.raise_for_status()
+                return _uazapi_request_failure(
+                    http_status=response.status_code,
+                    error_body=err_body,
+                )
             return response.json()
         except requests.exceptions.RequestException as e:
             print(f"❌ [Uazapi] Error send_media_campaign: {e}")
+            status = None
+            err_body: Any = None
             if hasattr(e, "response") and e.response is not None:
                 print(f"❌ [Uazapi] Response: {e.response.text}")
-            return None
+                try:
+                    status = e.response.status_code
+                except Exception:
+                    status = None
+                try:
+                    err_body = e.response.json()
+                except Exception:
+                    err_body = (getattr(e.response, "text", None) or str(e))[:4000]
+            return _uazapi_request_failure(
+                http_status=status,
+                error_body=err_body,
+                exception=e,
+            )
 
     def check_phone(
         self, token: str, numbers: list[str], timeout: int = 15

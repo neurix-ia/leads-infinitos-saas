@@ -68,6 +68,11 @@
             </button>
         </div>
         <p id="audit-meta" class="text-xs text-faint"></p>
+        <div id="audit-summary" class="hidden text-sm space-y-2 border-t border-[color:var(--card-border)] pt-3">
+            <div class="font-medium text-ink">Resumo por outcome</div>
+            <div id="audit-summary-grid" class="flex flex-wrap gap-2"></div>
+            <div id="audit-alerts" class="text-xs space-y-1"></div>
+        </div>
     </div>
 
     <div class="card p-4">
@@ -83,6 +88,9 @@
     const out = document.getElementById('audit-out');
     const meta = document.getElementById('audit-meta');
     const tailInput = document.getElementById('audit-tail');
+    const summaryBox = document.getElementById('audit-summary');
+    const summaryGrid = document.getElementById('audit-summary-grid');
+    const alertsBox = document.getElementById('audit-alerts');
 
     async function loadUsers() {
         selUser.innerHTML = '<option value="">Carregando…</option>';
@@ -131,6 +139,35 @@
         selCamp.disabled = false;
     });
 
+    function renderAuditSummary(events) {
+        if (!events || !events.length) {
+            summaryBox.classList.add('hidden');
+            summaryGrid.innerHTML = '';
+            alertsBox.innerHTML = '';
+            return;
+        }
+        const counts = {};
+        let nullStatus = 0;
+        let maxAttempts = 0;
+        events.forEach(ev => {
+            const o = ev.outcome || 'unknown';
+            counts[o] = (counts[o] || 0) + 1;
+            if (ev.http_status == null && o !== 'sent') nullStatus++;
+            if (o === 'failed_max_attempts') maxAttempts++;
+        });
+        summaryGrid.innerHTML = Object.entries(counts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => {
+                const warn = (k === 'failed_max_attempts' || k === 'retry_scheduled') ? ' ring-1 ring-amber-500/50' : '';
+                return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-200 dark:bg-gray-800 text-xs${warn}"><strong>${k}</strong>: ${n}</span>`;
+            }).join('');
+        const alerts = [];
+        if (nullStatus) alerts.push(`⚠️ ${nullStatus} evento(s) com http_status=null (falha sem resposta HTTP).`);
+        if (maxAttempts) alerts.push(`🛑 ${maxAttempts} evento(s) failed_max_attempts — teto de tentativas atingido.`);
+        alertsBox.innerHTML = alerts.map(a => `<div class="text-amber-700 dark:text-amber-300">${a}</div>`).join('');
+        summaryBox.classList.remove('hidden');
+    }
+
     document.getElementById('audit-load').addEventListener('click', async () => {
         const cid = selCamp.value;
         if (!cid) {
@@ -152,7 +189,9 @@
         meta.textContent = data.path
             ? `Arquivo: ${data.path} · linhas retornadas: ${data.returned_lines}${data.truncated ? ' (truncado)' : ''}`
             : '';
-        out.textContent = JSON.stringify(data.events || [], null, 2);
+        const events = data.events || [];
+        renderAuditSummary(events);
+        out.textContent = JSON.stringify(events, null, 2);
     });
 
     document.getElementById('audit-download').addEventListener('click', () => {
