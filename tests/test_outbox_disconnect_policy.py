@@ -10,6 +10,7 @@ import importlib
 import json
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -751,3 +752,138 @@ def test_outbox_tick_structured_uazapi_failure_not_marked_sent(
     monkeypatch.delenv("USE_MESSAGE_OUTBOX", raising=False)
     importlib.reload(__import__("utils.config", fromlist=["cfg"]))
     importlib.reload(__import__("worker_message_outbox", fromlist=["wmo"]))
+
+
+def test_reconcile_allows_enqueue_when_eligible_leads_exist_despite_future_pending(
+    db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch
+):
+    """Um outbox em backoff não bloqueia lote novo se há leads sem linha outbox."""
+    _reload_outbox_modules(monkeypatch, True)
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, leads = _insert_campaign_with_leads(
+        db_conn, user_id=uid, instance_id=iid, n_leads=3, name="reconcile unblock"
+    )
+    from psycopg2.extras import RealDictCursor
+
+    stuck_lead = leads[0]
+    future = datetime.utcnow() + timedelta(hours=2)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO campaign_message_outbox (
+                campaign_id, campaign_lead_id, instance_id,
+                stage, step_priority, status, queued_at, next_run_at,
+                idempotency_key, payload_summary
+            )
+            VALUES (%s, %s, %s, 'initial', 0, 'pending', NOW(), %s,
+                    %s, '{}'::jsonb)
+            """,
+            (
+                cid,
+                stuck_lead,
+                iid,
+                future,
+                f"campaign-{cid}-lead-{stuck_lead}-initial",
+            ),
+        )
+        db_conn.commit()
+
+    import worker_message_outbox as wmo
+
+    camp_win = {
+        "send_hour_start": ctd.DEFAULT_TEST_SEND_HOUR_START,
+        "send_hour_end": ctd.DEFAULT_TEST_SEND_HOUR_END,
+        "send_saturday": True,
+        "send_sunday": True,
+    }
+    quota = {"allows_more": True, "remaining_slots": 10}
+    ok, reason = wmo._reconcile_initial_outbox_in_flight(
+        db_conn, cid, camp_win, quota, force=False
+    )
+    assert ok is True
+    assert reason is None
+    assert wmo._count_eligible_pending_leads_without_initial_outbox(db_conn, cid) == 2
+
+    with patch.object(wmo, "is_campaign_send_window", return_value=True):
+        with patch.object(
+            wmo,
+            "initial_chunk_quota_snapshot",
+            return_value={
+                "allows_more": True,
+                "remaining_slots": 10,
+                "policy": "g3",
+            },
+        ):
+            with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM campaigns WHERE id = %s", (cid,))
+                camp = dict(cur.fetchone())
+            n, skip = wmo.schedule_next_initial_outbox_batch(
+                db_conn, camp, force=False
+            )
+            db_conn.commit()
+
+    assert n == 2
+    assert skip is None
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)::int AS n FROM campaign_message_outbox
+            WHERE campaign_id = %s AND status = 'pending'
+            """,
+            (cid,),
+        )
+        assert int(cur.fetchone()["n"]) == 3
+
+
+def test_reconcile_blocks_when_only_in_flight_pending_no_eligible_without_outbox(
+    db_conn, ensure_target_user, ensure_uazapi_instance, monkeypatch
+):
+    """Lote em andamento (todos com outbox) continua bloqueando novo enfileiramento."""
+    _reload_outbox_modules(monkeypatch, True)
+    uid = ensure_target_user
+    iid = ensure_uazapi_instance
+    cid, leads = _insert_campaign_with_leads(
+        db_conn, user_id=uid, instance_id=iid, n_leads=2, name="reconcile block batch"
+    )
+    from psycopg2.extras import RealDictCursor
+
+    now = datetime.utcnow()
+    with db_conn.cursor() as cur:
+        for lid in leads:
+            cur.execute(
+                """
+                INSERT INTO campaign_message_outbox (
+                    campaign_id, campaign_lead_id, instance_id,
+                    stage, step_priority, status, queued_at, next_run_at,
+                    idempotency_key, payload_summary
+                )
+                VALUES (%s, %s, %s, 'initial', 0, 'pending', NOW(), %s,
+                        %s, '{}'::jsonb)
+                """,
+                (
+                    cid,
+                    lid,
+                    iid,
+                    now,
+                    f"campaign-{cid}-lead-{lid}-initial",
+                ),
+            )
+        db_conn.commit()
+
+    import worker_message_outbox as wmo
+
+    camp_win = {
+        "send_hour_start": ctd.DEFAULT_TEST_SEND_HOUR_START,
+        "send_hour_end": ctd.DEFAULT_TEST_SEND_HOUR_END,
+        "send_saturday": True,
+        "send_sunday": True,
+    }
+    quota = {"allows_more": True, "remaining_slots": 10}
+    with patch.object(wmo, "is_campaign_send_window", return_value=True):
+        ok, reason = wmo._reconcile_initial_outbox_in_flight(
+            db_conn, cid, camp_win, quota, force=False
+        )
+    assert ok is False
+    assert reason == "initial_outbox_pending_active"
+    assert wmo._count_eligible_pending_leads_without_initial_outbox(db_conn, cid) == 0

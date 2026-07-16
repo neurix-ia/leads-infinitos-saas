@@ -8,6 +8,7 @@ import pytz
 from utils.next_valid_uazapi_send import (
     BRAZIL_TZ,
     is_campaign_send_window,
+    next_valid_send_after_current_window_utc_naive,
     next_valid_send_utc_naive,
 )
 
@@ -73,6 +74,26 @@ class TestNextValidSendUtcNaive(unittest.TestCase):
                 _camp(send_hour_start=14, send_hour_end=14),
                 datetime(2026, 6, 8, 13, 0, 0),
             )
+
+
+class TestNextValidSendAfterCurrentWindow(unittest.TestCase):
+    def test_inside_weekday_window_jumps_to_next_morning(self):
+        # Seg 8 Jun 2026 15:00 BRT = 18:00 UTC → próximo = Ter 9 Jun 08:00 BRT = 11:00 UTC
+        utc_naive = datetime(2026, 6, 8, 18, 0, 0)
+        out = next_valid_send_after_current_window_utc_naive(_camp(), utc_naive)
+        self.assertEqual(out, datetime(2026, 6, 9, 11, 0, 0))
+
+    def test_friday_afternoon_skips_weekend(self):
+        # Sex 12 Jun 2026 16:00 BRT = 19:00 UTC → Seg 15 Jun 08:00 BRT = 11:00 UTC
+        utc_naive = datetime(2026, 6, 12, 19, 0, 0)
+        out = next_valid_send_after_current_window_utc_naive(_camp(), utc_naive)
+        self.assertEqual(out, datetime(2026, 6, 15, 11, 0, 0))
+
+    def test_outside_window_same_as_next_valid(self):
+        # Sex 12 Jun 2026 07:00 BRT = 10:00 UTC (antes das 8h)
+        utc_naive = datetime(2026, 6, 12, 10, 0, 0)
+        out = next_valid_send_after_current_window_utc_naive(_camp(), utc_naive)
+        self.assertEqual(out, next_valid_send_utc_naive(_camp(), utc_naive))
 
 
 if __name__ == "__main__":

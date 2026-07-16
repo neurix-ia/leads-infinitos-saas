@@ -56,6 +56,23 @@ def _as_utc_naive(dt: datetime) -> datetime:
     return dt.astimezone(pytz.UTC).replace(tzinfo=None)
 
 
+def _campaign_send_hour_bounds(campaign: dict) -> tuple[int, int]:
+    try:
+        sh = int(
+            campaign.get("send_hour_start")
+            if campaign.get("send_hour_start") is not None
+            else BUSINESS_HOUR_START
+        )
+        eh = int(
+            campaign.get("send_hour_end")
+            if campaign.get("send_hour_end") is not None
+            else BUSINESS_HOUR_END
+        )
+    except (TypeError, ValueError):
+        sh, eh = BUSINESS_HOUR_START, BUSINESS_HOUR_END
+    return sh, eh
+
+
 def next_valid_send_utc_naive(
     campaign: dict,
     from_utc_naive: datetime,
@@ -78,19 +95,7 @@ def next_valid_send_utc_naive(
     br = utc.localize(start_utc_naive).astimezone(BRAZIL_TZ)
 
     # Detectar janela vazia (evita loop longo inútil)
-    try:
-        sh = int(
-            campaign.get("send_hour_start")
-            if campaign.get("send_hour_start") is not None
-            else BUSINESS_HOUR_START
-        )
-        eh = int(
-            campaign.get("send_hour_end")
-            if campaign.get("send_hour_end") is not None
-            else BUSINESS_HOUR_END
-        )
-    except (TypeError, ValueError):
-        sh, eh = BUSINESS_HOUR_START, BUSINESS_HOUR_END
+    sh, eh = _campaign_send_hour_bounds(campaign)
     if sh >= eh:
         raise ValueError(
             "campaign send window is empty or invalid (send_hour_start >= send_hour_end)"
@@ -104,4 +109,36 @@ def next_valid_send_utc_naive(
 
     raise ValueError(
         f"no valid send window within {max_search_days} days for this campaign configuration"
+    )
+
+
+def next_valid_send_after_current_window_utc_naive(
+    campaign: dict,
+    from_utc_naive: datetime,
+    *,
+    max_search_days: int = 14,
+) -> datetime:
+    """
+    Primeiro instante válido **depois** do fim da janela BRT actual (ou da corrente se
+    já estamos fora). Usado quando a cota diária esgotou: evita ``next_run_at=agora``
+    enquanto ainda estamos dentro de ``send_hour_start``–``send_hour_end``.
+    """
+    start_utc_naive = _as_utc_naive(from_utc_naive)
+    utc = pytz.UTC
+    br = utc.localize(start_utc_naive).astimezone(BRAZIL_TZ)
+    _sh, eh = _campaign_send_hour_bounds(campaign)
+    if _sh >= eh:
+        raise ValueError(
+            "campaign send window is empty or invalid (send_hour_start >= send_hour_end)"
+        )
+
+    if is_campaign_send_window(campaign, now_brazil=br):
+        # Janela é ``sh <= h < eh`` → às ``eh:00`` já estamos fora.
+        end_br = br.replace(hour=eh, minute=0, second=0, microsecond=0)
+        if end_br <= br:
+            end_br = br + timedelta(minutes=1)
+        start_utc_naive = end_br.astimezone(utc).replace(tzinfo=None)
+
+    return next_valid_send_utc_naive(
+        campaign, start_utc_naive, margin_minutes=0, max_search_days=max_search_days
     )
