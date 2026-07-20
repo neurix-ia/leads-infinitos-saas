@@ -25,6 +25,7 @@ def _reload_outbox(monkeypatch, enabled: bool = True):
 
 
 def test_prime_skipped_when_in_flight_pending(monkeypatch):
+    """Lote completo já na próxima janela → não enfileira de novo."""
     wmo = _reload_outbox(monkeypatch, True)
     conn = MagicMock()
     campaign = {
@@ -41,11 +42,28 @@ def test_prime_skipped_when_in_flight_pending(monkeypatch):
         "send_saturday": False,
         "send_sunday": False,
     }
-    with patch.object(wmo, "_count_initial_outbox_in_flight", return_value=3):
-        with patch.object(wmo, "_load_uazapi_instances_for_campaign") as load_inst:
-            n = wmo._prime_next_window_initial_outbox_batch(conn, campaign, camp_win)
+    future = datetime(2026, 7, 21, 11, 0, 0)
+    count_cur = MagicMock()
+    count_cur.fetchone.return_value = (30,)  # already full next-window batch
+    count_cur.__enter__ = MagicMock(return_value=count_cur)
+    count_cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = count_cur
+
+    with patch.object(
+        wmo, "_load_uazapi_instances_for_campaign", return_value=[{"instance_id": 135}]
+    ):
+        with patch.object(wmo, "_campaign_daily_batch_limit", return_value=30):
+            with patch.object(
+                wmo,
+                "next_valid_send_after_current_window_utc_naive",
+                return_value=future,
+            ):
+                with patch.object(wmo, "_persist_initial_outbox_batch") as persist:
+                    n = wmo._prime_next_window_initial_outbox_batch(
+                        conn, campaign, camp_win
+                    )
     assert n == 0
-    load_inst.assert_not_called()
+    persist.assert_not_called()
 
 
 def test_prime_enqueues_for_next_window_when_queue_empty(monkeypatch):
@@ -67,33 +85,87 @@ def test_prime_enqueues_for_next_window_when_queue_empty(monkeypatch):
     }
     future = datetime(2026, 7, 17, 11, 0, 0)
     leads = [{"id": 1}, {"id": 2}, {"id": 3}]
-    with patch.object(wmo, "_count_initial_outbox_in_flight", return_value=0):
-        with patch.object(
-            wmo,
-            "_load_uazapi_instances_for_campaign",
-            return_value=[{"instance_id": 135}],
-        ):
-            with patch.object(wmo, "_campaign_daily_batch_limit", return_value=30):
+
+    count_cur = MagicMock()
+    count_cur.fetchone.return_value = (0,)  # already_for_next = 0
+    count_cur.__enter__ = MagicMock(return_value=count_cur)
+    count_cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = count_cur
+
+    with patch.object(
+        wmo,
+        "_load_uazapi_instances_for_campaign",
+        return_value=[{"instance_id": 135}],
+    ):
+        with patch.object(wmo, "_campaign_daily_batch_limit", return_value=30):
+            with patch.object(
+                wmo, "_select_eligible_leads_for_initial_outbox", return_value=leads
+            ):
                 with patch.object(
-                    wmo, "_select_eligible_leads_for_initial_outbox", return_value=leads
+                    wmo,
+                    "next_valid_send_after_current_window_utc_naive",
+                    return_value=future,
                 ):
                     with patch.object(
-                        wmo,
-                        "next_valid_send_after_current_window_utc_naive",
-                        return_value=future,
-                    ):
-                        with patch.object(
-                            wmo, "_persist_initial_outbox_batch", return_value=3
-                        ) as persist:
-                            n = wmo._prime_next_window_initial_outbox_batch(
-                                conn, campaign, camp_win
-                            )
+                        wmo, "_persist_initial_outbox_batch", return_value=3
+                    ) as persist:
+                        n = wmo._prime_next_window_initial_outbox_batch(
+                            conn, campaign, camp_win
+                        )
     assert n == 3
     persist.assert_called_once()
     kwargs = persist.call_args.kwargs
     assert kwargs["next_run_at_val"] == future
     assert kwargs["enqueue_reason"] == "prime_next_window"
     assert kwargs["leads"] == leads
+
+
+def test_prime_completes_partial_next_window_batch(monkeypatch):
+    """Se já há 5 pending para amanhã, completa só mais 25."""
+    wmo = _reload_outbox(monkeypatch, True)
+    conn = MagicMock()
+    campaign = {
+        "id": 279,
+        "user_id": 10,
+        "daily_limit": 30,
+        "rotation_mode": "single",
+        "status": "running",
+    }
+    camp_win = {
+        "send_hour_start": 8,
+        "send_hour_end": 20,
+        "send_saturday": False,
+        "send_sunday": False,
+    }
+    future = datetime(2026, 7, 21, 11, 0, 0)
+    leads = [{"id": i} for i in range(25)]
+
+    count_cur = MagicMock()
+    count_cur.fetchone.return_value = (5,)  # already_for_next
+    count_cur.__enter__ = MagicMock(return_value=count_cur)
+    count_cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = count_cur
+
+    with patch.object(
+        wmo, "_load_uazapi_instances_for_campaign", return_value=[{"instance_id": 135}]
+    ):
+        with patch.object(wmo, "_campaign_daily_batch_limit", return_value=30):
+            with patch.object(
+                wmo, "_select_eligible_leads_for_initial_outbox", return_value=leads
+            ) as sel:
+                with patch.object(
+                    wmo,
+                    "next_valid_send_after_current_window_utc_naive",
+                    return_value=future,
+                ):
+                    with patch.object(
+                        wmo, "_persist_initial_outbox_batch", return_value=25
+                    ):
+                        n = wmo._prime_next_window_initial_outbox_batch(
+                            conn, campaign, camp_win
+                        )
+    assert n == 25
+    assert sel.call_args.args[2] == 25
 
 
 def test_schedule_primes_when_quota_exhausted(monkeypatch):

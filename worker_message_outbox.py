@@ -408,7 +408,9 @@ def _defer_pending_initial_rows_to_next_window(
     """Reprograma initial ``pending`` para a próxima janela BRT válida (rollover diário)."""
     now_utc = datetime.utcnow()
     try:
-        next_at = next_valid_send_utc_naive(camp_win, now_utc, margin_minutes=0)
+        # Cota esgotada dentro da janela: NÃO usar next_valid(agora)=agora (fica em loop
+        # e bloqueia o prime do dia seguinte). Salta para depois do fim da janela actual.
+        next_at = next_valid_send_after_current_window_utc_naive(camp_win, now_utc)
     except ValueError:
         return 0
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -857,19 +859,14 @@ def _prime_next_window_initial_outbox_batch(
     conn, campaign: dict, camp_win: dict
 ) -> int:
     """
-    Cota do dia esgotada e fila initial vazia → enfileira 1 lote (daily_limit) para a
-    próxima abertura de janela BRT (dia útil seguinte se ainda dentro da janela de hoje).
+    Cota do dia esgotada → completa 1 lote (daily_limit) para a próxima abertura de
+    janela BRT. Se já existir parte do lote pré-agendada, só completa o restante.
     """
     cid = int(campaign["id"])
-    if _count_initial_outbox_in_flight(conn, cid) > 0:
-        return 0
     instances = _load_uazapi_instances_for_campaign(conn, cid)
     if not instances:
         return 0
     batch_limit = _campaign_daily_batch_limit(campaign, len(instances))
-    leads = _select_eligible_leads_for_initial_outbox(conn, cid, batch_limit)
-    if not leads:
-        return 0
     now_utc = datetime.utcnow()
     try:
         next_run_at_val = next_valid_send_after_current_window_utc_naive(
@@ -877,6 +874,29 @@ def _prime_next_window_initial_outbox_batch(
         )
     except ValueError:
         _log_outbox_schedule_skip(cid, "no_valid_send_window")
+        return 0
+
+    # Já agendados para a próxima janela (ou depois) contam no lote do dia seguinte.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)::int AS n
+            FROM campaign_message_outbox
+            WHERE campaign_id = %s
+              AND LOWER(TRIM(stage)) = 'initial'
+              AND status IN ('pending', 'sending', 'waiting_instance')
+              AND next_run_at >= %s
+            """,
+            (cid, next_run_at_val),
+        )
+        row = cur.fetchone()
+    already_for_next = int((row[0] if row else 0) or 0)
+    need = batch_limit - already_for_next
+    if need <= 0:
+        return 0
+
+    leads = _select_eligible_leads_for_initial_outbox(conn, cid, need)
+    if not leads:
         return 0
     rotation_mode = (campaign.get("rotation_mode") or "single").strip().lower()
     n = _persist_initial_outbox_batch(
@@ -895,6 +915,7 @@ def _prime_next_window_initial_outbox_batch(
                 "event": "outbox_primed_next_window",
                 "campaign_id": cid,
                 "rows_enqueued": n,
+                "already_for_next": already_for_next,
                 "next_run_at": next_run_at_val.isoformat(),
             },
             ensure_ascii=False,
@@ -1156,6 +1177,11 @@ def maybe_schedule_outbox_initial_batches(conn) -> None:
     """
     if not USE_MESSAGE_OUTBOX:
         return
+    try:
+        # Tick anterior pode ter deixado a conexão em estado abortado.
+        conn.rollback()
+    except Exception:
+        pass
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
@@ -1180,12 +1206,32 @@ def maybe_schedule_outbox_initial_batches(conn) -> None:
         campaigns = cur.fetchall() or []
     for camp in campaigns:
         camp = dict(camp)
-        n, _reason = schedule_next_initial_outbox_batch(conn, camp)
+        try:
+            n, reason = schedule_next_initial_outbox_batch(conn, camp)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.exception(
+                "maybe_schedule_outbox_initial_batches failed campaign_id=%s",
+                camp.get("id"),
+            )
+            continue
         if n > 0:
             print(
                 f"  📤 [Initial Outbox] Campaign '{camp.get('name')}': "
                 f"enfileirados {n} envio(s) initial (outbox /send/text)"
+                + (f" reason={reason}" if reason else "")
             )
+        elif reason and reason not in (
+            "daily_quota_exceeded",
+            "initial_outbox_already_queued",
+            "initial_outbox_pending_scheduled",
+            "initial_outbox_pending_active",
+            "initial_outbox_sending",
+        ):
+            _log_outbox_schedule_skip(int(camp["id"]), str(reason))
 
 
 def enqueue_missing_cadence_outbox_rows(conn) -> None:
@@ -1645,7 +1691,7 @@ def _defer_initial_row_daily_quota(conn, row: dict) -> None:
     cid = int(row["campaign_id"])
     oid = int(row["id"])
     try:
-        nv = next_valid_send_utc_naive(cd, datetime.utcnow(), margin_minutes=0)
+        nv = next_valid_send_after_current_window_utc_naive(cd, datetime.utcnow())
     except ValueError:
         _defer_row_retry_later(conn, oid, minutes=60)
         return
