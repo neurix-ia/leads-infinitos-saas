@@ -85,6 +85,7 @@ from utils.uazapi_support_notify import (
 )
 
 from worker_message_outbox import (
+    maybe_auto_force_daily_initial_batches,
     maybe_schedule_outbox_initial_batches,
     process_message_outbox_tick,
     schedule_next_initial_outbox_batch,
@@ -2067,6 +2068,8 @@ def process_cadence():
             if USE_MESSAGE_OUTBOX:
                 process_message_outbox_tick(conn)
                 maybe_schedule_outbox_initial_batches(conn)
+                # Fallback duro: 08:00–08:29 BRT force chunk se a fila ficou vazia
+                maybe_auto_force_daily_initial_batches(conn)
 
             # Pré-disparo determinístico para agendamentos de etapa (2-5 min antes)
             _materialize_scheduled_stage_sends(conn)

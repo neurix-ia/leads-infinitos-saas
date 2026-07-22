@@ -29,6 +29,7 @@ from utils.limits import (
     initial_chunk_quota_snapshot,
 )
 from utils.next_valid_uazapi_send import (
+    BRAZIL_TZ,
     is_campaign_send_window,
     next_valid_send_after_current_window_utc_naive,
     next_valid_send_utc_naive,
@@ -42,6 +43,10 @@ except ImportError:
     uazapi_service = None
 
 logger = logging.getLogger(__name__)
+
+# Auto-force diário: (campaign_id, YYYY-MM-DD BRT) já processados neste processo.
+_AUTO_FORCE_DAILY_DONE: set[tuple[int, str]] = set()
+_AUTO_FORCE_WINDOW_MINUTES = 30
 
 
 def get_db_connection():
@@ -1182,28 +1187,7 @@ def maybe_schedule_outbox_initial_batches(conn) -> None:
         conn.rollback()
     except Exception:
         pass
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT c.id, c.name, c.user_id, c.status, c.enable_cadence,
-                   c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
-                   c.use_uazapi_sender, c.scheduled_start, c.rotation_mode, c.daily_limit
-            FROM campaigns c
-            WHERE c.status IN ('running', 'pending')
-              AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
-              AND EXISTS (
-                  SELECT 1 FROM campaign_leads cl
-                  WHERE cl.campaign_id = c.id
-                    AND cl.status = 'pending'
-                    AND cl.current_step = 1
-                    AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
-                    AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost')
-                  LIMIT 1
-              )
-            ORDER BY c.id ASC
-            """
-        )
-        campaigns = cur.fetchall() or []
+    campaigns = _list_uazapi_campaigns_needing_initial(conn)
     for camp in campaigns:
         camp = dict(camp)
         try:
@@ -1232,6 +1216,153 @@ def maybe_schedule_outbox_initial_batches(conn) -> None:
             "initial_outbox_sending",
         ):
             _log_outbox_schedule_skip(int(camp["id"]), str(reason))
+
+
+def _list_uazapi_campaigns_needing_initial(conn) -> list:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.name, c.user_id, c.status, c.enable_cadence,
+                   c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
+                   c.use_uazapi_sender, c.scheduled_start, c.rotation_mode, c.daily_limit
+            FROM campaigns c
+            WHERE c.status IN ('running', 'pending')
+              AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM campaign_leads cl
+                  WHERE cl.campaign_id = c.id
+                    AND cl.status = 'pending'
+                    AND cl.current_step = 1
+                    AND COALESCE(cl.removed_from_funnel, FALSE) = FALSE
+                    AND COALESCE(cl.cadence_status, 'active') NOT IN ('converted', 'lost')
+                  LIMIT 1
+              )
+            ORDER BY c.id ASC
+            """
+        )
+        return [dict(r) for r in (cur.fetchall() or [])]
+
+
+def _prune_auto_force_daily_done(today_brt: str) -> None:
+    stale = [k for k in _AUTO_FORCE_DAILY_DONE if k[1] != today_brt]
+    for k in stale:
+        _AUTO_FORCE_DAILY_DONE.discard(k)
+
+
+def _is_auto_force_morning_window(camp: dict, now_brazil: datetime) -> bool:
+    """True na 1ª meia-hora da janela de envio da campanha (ex.: 8:00–8:29)."""
+    try:
+        sh = int(
+            camp.get("send_hour_start")
+            if camp.get("send_hour_start") is not None
+            else 8
+        )
+    except (TypeError, ValueError):
+        sh = 8
+    if now_brazil.hour != sh:
+        return False
+    return 0 <= int(now_brazil.minute) < _AUTO_FORCE_WINDOW_MINUTES
+
+
+def maybe_auto_force_daily_initial_batches(
+    conn, *, now_brazil: Optional[datetime] = None
+) -> int:
+    """
+    Fallback operacional: no início da janela BRT (default 08:00–08:29), força
+    ``schedule_next_initial_outbox_batch(..., force=True)`` se a campanha tem leads
+    elegíveis e a fila initial está vazia.
+
+    Uma vez por campanha por dia BRT (set em memória + skip se já há in-flight).
+    Respeita sáb/domingo via ``is_campaign_send_window``.
+    """
+    if not USE_MESSAGE_OUTBOX:
+        return 0
+    now_br = now_brazil or datetime.now(BRAZIL_TZ)
+    if now_br.tzinfo is None:
+        now_br = BRAZIL_TZ.localize(now_br)
+    else:
+        now_br = now_br.astimezone(BRAZIL_TZ)
+    today = now_br.strftime("%Y-%m-%d")
+    _prune_auto_force_daily_done(today)
+
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+
+    total = 0
+    for camp in _list_uazapi_campaigns_needing_initial(conn):
+        cid = int(camp["id"])
+        key = (cid, today)
+        if key in _AUTO_FORCE_DAILY_DONE:
+            continue
+        if not _is_auto_force_morning_window(camp, now_br):
+            continue
+        camp_win = {
+            "send_hour_start": camp.get("send_hour_start"),
+            "send_hour_end": camp.get("send_hour_end"),
+            "send_saturday": camp.get("send_saturday"),
+            "send_sunday": camp.get("send_sunday"),
+        }
+        if not is_campaign_send_window(camp_win, now_brazil=now_br):
+            _AUTO_FORCE_DAILY_DONE.add(key)
+            continue
+
+        in_flight = _count_initial_outbox_in_flight(conn, cid)
+        if in_flight > 0:
+            _AUTO_FORCE_DAILY_DONE.add(key)
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "outbox_auto_force_daily_skip",
+                        "campaign_id": cid,
+                        "reason": "already_in_flight",
+                        "in_flight": in_flight,
+                        "brt_date": today,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            continue
+
+        eligible = _count_eligible_pending_leads_without_initial_outbox(conn, cid)
+        if eligible <= 0:
+            _AUTO_FORCE_DAILY_DONE.add(key)
+            continue
+
+        try:
+            n, reason = schedule_next_initial_outbox_batch(conn, camp, force=True)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.exception(
+                "maybe_auto_force_daily_initial_batches failed campaign_id=%s", cid
+            )
+            continue
+
+        _AUTO_FORCE_DAILY_DONE.add(key)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "outbox_auto_force_daily",
+                    "campaign_id": cid,
+                    "rows_enqueued": n,
+                    "reason": reason,
+                    "brt_date": today,
+                    "eligible": eligible,
+                },
+                ensure_ascii=False,
+            )
+        )
+        if n > 0:
+            total += n
+            print(
+                f"  ⚡ [Auto Force 8h] Campaign '{camp.get('name')}': "
+                f"force chunk enfileirou {n} envio(s) initial"
+            )
+    return total
 
 
 def enqueue_missing_cadence_outbox_rows(conn) -> None:
