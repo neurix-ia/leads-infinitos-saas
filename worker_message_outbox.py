@@ -44,9 +44,30 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Auto-force diário: (campaign_id, YYYY-MM-DD BRT) já processados neste processo.
+# Auto-force diário: (campaign_id, YYYY-MM-DD BRT) já concluídos com sucesso neste processo.
 _AUTO_FORCE_DAILY_DONE: set[tuple[int, str]] = set()
-_AUTO_FORCE_WINDOW_MINUTES = 30
+# Janela de catch-up após send_hour_start (horas). Default 6 → 08:00–13:59 se start=8.
+_AUTO_FORCE_CATCHUP_HOURS = max(
+    1, int((os.environ.get("OUTBOX_AUTO_FORCE_CATCHUP_HOURS") or "6").strip() or "6")
+)
+# Users prioritários (ex.: "10") — mesmo catch-up; default inclui GC Talentos.
+def _parse_priority_user_ids() -> set[int]:
+    raw = (os.environ.get("OUTBOX_AUTO_FORCE_PRIORITY_USER_IDS") or "10").strip()
+    out: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except ValueError:
+            continue
+    return out
+
+
+_AUTO_FORCE_PRIORITY_USER_IDS = _parse_priority_user_ids()
+# Compat: testes antigos referiam _AUTO_FORCE_WINDOW_MINUTES
+_AUTO_FORCE_WINDOW_MINUTES = 60  # unused for gate; kept for diag
 
 
 def get_db_connection():
@@ -1218,16 +1239,24 @@ def maybe_schedule_outbox_initial_batches(conn) -> None:
             _log_outbox_schedule_skip(int(camp["id"]), str(reason))
 
 
-def _list_uazapi_campaigns_needing_initial(conn) -> list:
+def _list_uazapi_campaigns_needing_initial(
+    conn, *, user_id: Optional[int] = None
+) -> list:
+    params: list = []
+    user_clause = ""
+    if user_id is not None:
+        user_clause = " AND c.user_id = %s "
+        params.append(int(user_id))
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """
+            f"""
             SELECT c.id, c.name, c.user_id, c.status, c.enable_cadence,
                    c.send_hour_start, c.send_hour_end, c.send_saturday, c.send_sunday,
                    c.use_uazapi_sender, c.scheduled_start, c.rotation_mode, c.daily_limit
             FROM campaigns c
             WHERE c.status IN ('running', 'pending')
               AND COALESCE(c.use_uazapi_sender, FALSE) = TRUE
+              {user_clause}
               AND EXISTS (
                   SELECT 1 FROM campaign_leads cl
                   WHERE cl.campaign_id = c.id
@@ -1238,7 +1267,8 @@ def _list_uazapi_campaigns_needing_initial(conn) -> list:
                   LIMIT 1
               )
             ORDER BY c.id ASC
-            """
+            """,
+            tuple(params),
         )
         return [dict(r) for r in (cur.fetchall() or [])]
 
@@ -1249,31 +1279,117 @@ def _prune_auto_force_daily_done(today_brt: str) -> None:
         _AUTO_FORCE_DAILY_DONE.discard(k)
 
 
-def _is_auto_force_morning_window(camp: dict, now_brazil: datetime) -> bool:
-    """True na 1ª meia-hora da janela de envio da campanha (ex.: 8:00–8:29)."""
+def _campaign_send_hour_start(camp: dict) -> int:
     try:
-        sh = int(
+        return int(
             camp.get("send_hour_start")
             if camp.get("send_hour_start") is not None
             else 8
         )
     except (TypeError, ValueError):
-        sh = 8
-    if now_brazil.hour != sh:
+        return 8
+
+
+def _campaign_send_hour_end(camp: dict) -> int:
+    try:
+        return int(
+            camp.get("send_hour_end")
+            if camp.get("send_hour_end") is not None
+            else 20
+        )
+    except (TypeError, ValueError):
+        return 20
+
+
+def _is_auto_force_catchup_window(camp: dict, now_brazil: datetime) -> bool:
+    """
+    True desde send_hour_start até send_hour_start+CATCHUP_HOURS (cap em send_hour_end).
+    Ex.: start=8, catchup=6 → 08:00–13:59 BRT, enquanto a janela de envio estiver aberta.
+    """
+    camp_win = {
+        "send_hour_start": camp.get("send_hour_start"),
+        "send_hour_end": camp.get("send_hour_end"),
+        "send_saturday": camp.get("send_saturday"),
+        "send_sunday": camp.get("send_sunday"),
+    }
+    if not is_campaign_send_window(camp_win, now_brazil=now_brazil):
         return False
-    return 0 <= int(now_brazil.minute) < _AUTO_FORCE_WINDOW_MINUTES
+    sh = _campaign_send_hour_start(camp)
+    eh = _campaign_send_hour_end(camp)
+    end_h = min(sh + max(1, _AUTO_FORCE_CATCHUP_HOURS), eh)
+    return sh <= int(now_brazil.hour) < end_h
+
+
+def force_initial_outbox_batches_for_user(
+    conn, user_id: int, *, force: bool = True
+) -> dict:
+    """
+    Force chunk (schedule force=True) em todas as campanhas Uazapi running/pending
+    do utilizador com leads initial elegíveis. Usado pelo script ops e pelo auto-force.
+    """
+    uid = int(user_id)
+    results = []
+    total = 0
+    for camp in _list_uazapi_campaigns_needing_initial(conn, user_id=uid):
+        cid = int(camp["id"])
+        eligible = _count_eligible_pending_leads_without_initial_outbox(conn, cid)
+        in_flight = _count_initial_outbox_in_flight(conn, cid)
+        entry = {
+            "campaign_id": cid,
+            "name": camp.get("name"),
+            "eligible": eligible,
+            "in_flight": in_flight,
+            "rows_enqueued": 0,
+            "reason": None,
+        }
+        if eligible <= 0:
+            entry["reason"] = "no_eligible"
+            results.append(entry)
+            continue
+        if in_flight > 0 and not force:
+            entry["reason"] = "already_in_flight"
+            results.append(entry)
+            continue
+        # Com force=True ainda pulamos se já há fila — evita duplicar lote do dia.
+        if in_flight > 0:
+            entry["reason"] = "already_in_flight"
+            results.append(entry)
+            continue
+        try:
+            n, reason = schedule_next_initial_outbox_batch(conn, camp, force=True)
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            entry["reason"] = f"error:{type(e).__name__}"
+            results.append(entry)
+            logger.exception(
+                "force_initial_outbox_batches_for_user failed campaign_id=%s", cid
+            )
+            continue
+        entry["rows_enqueued"] = int(n or 0)
+        entry["reason"] = reason
+        total += int(n or 0)
+        results.append(entry)
+        if n > 0:
+            print(
+                f"  ⚡ [Force user={uid}] Campaign '{camp.get('name')}' id={cid}: "
+                f"enfileirou {n}"
+            )
+    return {"user_id": uid, "rows_enqueued": total, "campaigns": results}
 
 
 def maybe_auto_force_daily_initial_batches(
     conn, *, now_brazil: Optional[datetime] = None
 ) -> int:
     """
-    Fallback operacional: no início da janela BRT (default 08:00–08:29), força
-    ``schedule_next_initial_outbox_batch(..., force=True)`` se a campanha tem leads
-    elegíveis e a fila initial está vazia.
+    Fallback operacional: durante catch-up matinal BRT (default 6h após send_hour_start),
+    força ``schedule_next_initial_outbox_batch(..., force=True)`` se a fila initial
+    está vazia e há leads elegíveis.
 
-    Uma vez por campanha por dia BRT (set em memória + skip se já há in-flight).
-    Respeita sáb/domingo via ``is_campaign_send_window``.
+    Só marca o dia como concluído quando enfileirou, já há in-flight, não há elegíveis
+    ou a cota do dia esgotou — falhas transitórias re-tentam no próximo tick.
     """
     if not USE_MESSAGE_OUTBOX:
         return 0
@@ -1296,16 +1412,7 @@ def maybe_auto_force_daily_initial_batches(
         key = (cid, today)
         if key in _AUTO_FORCE_DAILY_DONE:
             continue
-        if not _is_auto_force_morning_window(camp, now_br):
-            continue
-        camp_win = {
-            "send_hour_start": camp.get("send_hour_start"),
-            "send_hour_end": camp.get("send_hour_end"),
-            "send_saturday": camp.get("send_saturday"),
-            "send_sunday": camp.get("send_sunday"),
-        }
-        if not is_campaign_send_window(camp_win, now_brazil=now_br):
-            _AUTO_FORCE_DAILY_DONE.add(key)
+        if not _is_auto_force_catchup_window(camp, now_br):
             continue
 
         in_flight = _count_initial_outbox_in_flight(conn, cid)
@@ -1340,28 +1447,41 @@ def maybe_auto_force_daily_initial_batches(
             logger.exception(
                 "maybe_auto_force_daily_initial_batches failed campaign_id=%s", cid
             )
+            # Não marca done → re-tenta no próximo tick dentro do catch-up.
             continue
 
-        _AUTO_FORCE_DAILY_DONE.add(key)
         logger.info(
             json.dumps(
                 {
                     "event": "outbox_auto_force_daily",
                     "campaign_id": cid,
+                    "user_id": camp.get("user_id"),
                     "rows_enqueued": n,
                     "reason": reason,
                     "brt_date": today,
                     "eligible": eligible,
+                    "priority_user": int(camp.get("user_id") or 0)
+                    in _AUTO_FORCE_PRIORITY_USER_IDS,
                 },
                 ensure_ascii=False,
             )
         )
         if n > 0:
+            _AUTO_FORCE_DAILY_DONE.add(key)
             total += n
             print(
-                f"  ⚡ [Auto Force 8h] Campaign '{camp.get('name')}': "
+                f"  ⚡ [Auto Force] Campaign '{camp.get('name')}': "
                 f"force chunk enfileirou {n} envio(s) initial"
             )
+        elif reason in (
+            "daily_quota_exceeded",
+            "primed_next_window",
+            "no_pending_leads",
+            "no_eligible_pending_leads",
+            "campaign_not_active",
+        ):
+            _AUTO_FORCE_DAILY_DONE.add(key)
+        # demais reasons (persist_failed, etc.) → re-tenta
     return total
 
 
