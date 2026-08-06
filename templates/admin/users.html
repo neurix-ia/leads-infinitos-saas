@@ -362,6 +362,13 @@
         }
     }
 
+    function _maskToken(token) {
+        const t = (token || '').trim();
+        if (!t) return '(sem token)';
+        if (t.length < 10) return '(token curto)';
+        return `${t.slice(0, 4)}…${t.slice(-4)} (len=${t.length})`;
+    }
+
     function renderInstances() {
         const waDiv = document.getElementById('detailWhatsapp');
         if (!currentUserInstances.length) {
@@ -373,24 +380,92 @@
             const status = (inst.status || 'disconnected').toLowerCase();
             const statusColor = status === 'connected' ? 'text-green-600 dark:text-green-400' : (status === 'connecting' ? 'text-amber-600 dark:text-yellow-400' : 'text-faint');
             const provider = (inst.api_provider || 'megaapi').toUpperCase();
+            const hasToken = !!(inst.apikey || '').trim();
             return `
-                <div class="flex items-center gap-2 border border-[color:var(--card-border)] rounded p-2">
-                    <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2">
-                            <span class="font-medium ${statusColor}">${inst.name}</span>
-                            <span class="text-xs text-faint">(${status})</span>
-                            <span class="text-[10px] px-1 py-0.5 rounded bg-black/[0.06] dark:bg-gray-700 text-ink">${provider}</span>
+                <div class="border border-[color:var(--card-border)] rounded p-2 space-y-2">
+                    <div class="flex items-center gap-2">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <span class="font-medium ${statusColor}">${inst.name}</span>
+                                <span class="text-xs text-faint">(${status})</span>
+                                <span class="text-[10px] px-1 py-0.5 rounded bg-black/[0.06] dark:bg-gray-700 text-ink">${provider}</span>
+                                <span class="text-[10px] text-faint">${_maskToken(inst.apikey)}</span>
+                            </div>
+                            <div id="waJidContainer-${inst.id}" class="text-xs text-faint truncate"></div>
                         </div>
-                        <div id="waJidContainer-${inst.id}" class="text-xs text-faint truncate"></div>
+                        <button type="button" data-instance-id="${inst.id}"
+                            onclick="verifyWhatsappStatusById(${inst.id})"
+                            class="text-xs bg-blue-500/20 text-blue-700 dark:text-blue-400 px-2 py-1 rounded hover:bg-blue-500/30 transition-colors"
+                            title="Verificar Status" ${hasToken ? '' : 'disabled'}>
+                            ⟳
+                        </button>
                     </div>
-                    <button onclick="verifyWhatsappStatus('${inst.apikey}', ${inst.id})"
-                        class="text-xs bg-blue-500/20 text-blue-700 dark:text-blue-400 px-2 py-1 rounded hover:bg-blue-500/30 transition-colors"
-                        title="Verificar Status">
-                        ⟳
-                    </button>
+                    <div class="flex gap-2 items-center">
+                        <input type="text" id="tokenInput-${inst.id}"
+                            placeholder="Colar token Uazapi (substituir)"
+                            autocomplete="off"
+                            class="flex-1 min-w-0 bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded text-ink px-2 py-1 text-xs focus:outline-none focus:border-primary">
+                        <button type="button" onclick="saveInstanceToken(${inst.id})"
+                            class="px-2 py-1 bg-green-500/20 text-green-700 dark:text-green-400 border border-green-500/30 rounded hover:bg-green-500/30 transition-colors text-xs whitespace-nowrap">
+                            Salvar token
+                        </button>
+                    </div>
+                    <div id="tokenMsg-${inst.id}" class="hidden text-xs"></div>
                 </div>
             `;
         }).join('');
+    }
+
+    async function saveInstanceToken(instanceId) {
+        if (!currentUserId) return;
+        const input = document.getElementById(`tokenInput-${instanceId}`);
+        const msg = document.getElementById(`tokenMsg-${instanceId}`);
+        const token = (input && input.value || '').trim();
+        if (!token) {
+            alert('Cole o token Uazapi da instância.');
+            return;
+        }
+        if (msg) {
+            msg.classList.remove('hidden', 'text-red-600', 'dark:text-red-400', 'text-green-600', 'dark:text-green-400');
+            msg.textContent = 'Salvando…';
+            msg.classList.add('text-faint');
+        }
+        try {
+            const response = await fetch(`/admin/users/${currentUserId}/instances/${instanceId}/token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token, api_provider: 'uazapi' }),
+            });
+            const result = await response.json();
+            if (!response.ok || result.error) {
+                throw new Error(result.error || 'Erro ao salvar token');
+            }
+            const idx = currentUserInstances.findIndex((i) => i.id === instanceId);
+            if (idx >= 0 && result.instance) {
+                currentUserInstances[idx] = { ...currentUserInstances[idx], ...result.instance };
+            }
+            renderInstances();
+            const jidContainer = document.getElementById(`waJidContainer-${instanceId}`);
+            if (jidContainer && result.remote_jid) {
+                jidContainer.innerHTML = `<span class="text-xs text-green-600 dark:text-green-400 block">${result.remote_jid} (Validado)</span>`;
+            }
+            const okMsg = document.getElementById(`tokenMsg-${instanceId}`);
+            if (okMsg) {
+                okMsg.classList.remove('hidden', 'text-faint');
+                okMsg.classList.add('text-green-600', 'dark:text-green-400');
+                okMsg.textContent = result.status_checked
+                    ? `Token salvo. Status: ${result.instance.status}`
+                    : 'Token salvo (status Uazapi não confirmado).';
+            }
+        } catch (e) {
+            if (msg) {
+                msg.classList.remove('hidden', 'text-faint', 'text-green-600', 'dark:text-green-400');
+                msg.classList.add('text-red-600', 'dark:text-red-400');
+                msg.textContent = e.message || 'Erro ao salvar token';
+            } else {
+                alert(e.message || 'Erro ao salvar token');
+            }
+        }
     }
 
     async function saveUserChanges() {
@@ -418,42 +493,50 @@
         }
     }
 
-    async function verifyWhatsappStatus(apiKey, instanceId) {
-        if (!apiKey) return;
-
-        const btn = document.querySelector(`button[onclick="verifyWhatsappStatus('${apiKey}', ${instanceId})"]`);
+    async function verifyWhatsappStatusById(instanceId) {
+        const inst = currentUserInstances.find((i) => i.id === instanceId);
+        if (!inst || !(inst.apikey || '').trim()) {
+            alert('Instância sem token. Cole e salve o token Uazapi antes de verificar.');
+            return;
+        }
+        const apiKey = inst.apikey;
+        const btn = document.querySelector(`button[data-instance-id="${instanceId}"]`);
         if (!btn) return;
         const originalContent = btn.innerHTML;
         btn.innerHTML = '...';
         btn.disabled = true;
 
         try {
-            const response = await fetch(`/admin/whatsapp/check_status/${apiKey}`, { method: 'POST' });
+            const response = await fetch(`/admin/whatsapp/check_status/${encodeURIComponent(apiKey)}`, { method: 'POST' });
             const data = await response.json();
 
             if (data.status) {
-                // Determine JID
                 const jid = data.remote_jid || (data.result && data.result.me);
-
-                // Update JID display directly
                 const jidContainer = document.getElementById(`waJidContainer-${instanceId}`);
-                if (jid) {
-                    jidContainer.innerHTML = `<span class="text-xs text-green-600 dark:text-green-400 block">${jid} (Validado)</span>`;
-                } else {
-                    jidContainer.innerHTML = `<span class="text-xs text-faint block">JID não detectado</span>`;
+                if (jidContainer) {
+                    if (jid) {
+                        jidContainer.innerHTML = `<span class="text-xs text-green-600 dark:text-green-400 block">${jid} (Validado)</span>`;
+                    } else {
+                        jidContainer.innerHTML = `<span class="text-xs text-faint block">JID não detectado</span>`;
+                    }
                 }
-
-                // Temporary success indicator on button
-                btn.classList.add('text-green-400');
-                setTimeout(() => btn.classList.remove('text-green-400'), 1000);
+                inst.status = data.status;
+                renderInstances();
+                const jidAfter = document.getElementById(`waJidContainer-${instanceId}`);
+                if (jidAfter && jid) {
+                    jidAfter.innerHTML = `<span class="text-xs text-green-600 dark:text-green-400 block">${jid} (Validado)</span>`;
+                }
             } else {
-                alert('Erro na verificação');
+                alert('Erro na verificação: ' + (data.error || 'falha'));
             }
         } catch (e) {
             alert('Erro ao verificar status');
         } finally {
-            btn.innerHTML = originalContent;
-            btn.disabled = false;
+            const btn2 = document.querySelector(`button[data-instance-id="${instanceId}"]`);
+            if (btn2) {
+                btn2.innerHTML = originalContent;
+                btn2.disabled = false;
+            }
         }
     }
 

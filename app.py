@@ -6263,7 +6263,117 @@ def admin_add_user_instance(user_id):
         return {"error": "Erro ao adicionar instância via Uazapi."}, 500
     finally:
         conn.close()
-    
+
+
+@app.route('/admin/users/<int:user_id>/instances/<int:instance_id>/token', methods=['POST'])
+@login_required
+@admin_required
+def admin_set_instance_uazapi_token(user_id, instance_id):
+    """
+    Define ou substitui o token Uazapi de uma instância já existente no Leads Infinitos.
+    Útil quando a instância foi criada sem token válido / precisa religar token da Uazapi.
+    """
+    data = request.get_json(silent=True) or request.form or {}
+    token = (data.get("token") or data.get("apikey") or "").strip()
+    if not token:
+        return {"error": "Informe o token da instância Uazapi."}, 400
+    if len(token) < 8:
+        return {"error": "Token inválido (muito curto)."}, 400
+
+    provider = (data.get("api_provider") or "uazapi").strip().lower() or "uazapi"
+    if provider != "uazapi":
+        return {"error": "Apenas api_provider=uazapi é suportado neste endpoint."}, 400
+
+    new_status = None
+    remote_jid = None
+    try:
+        uazapi = UazapiService()
+        result = uazapi.get_status(token)
+        if result:
+            instance_data = result.get("instance") or result
+            status_val = (
+                instance_data.get("status", "disconnected")
+                if isinstance(instance_data, dict)
+                else "disconnected"
+            )
+            new_status = (
+                status_val
+                if status_val in ("connected", "connecting", "disconnected")
+                else "disconnected"
+            )
+            if isinstance(result, dict):
+                remote_jid = result.get("id") or result.get("me")
+                if not remote_jid and result.get("instance_data"):
+                    remote_jid = (
+                        result["instance_data"].get("phone")
+                        or result["instance_data"].get("user")
+                        or result["instance_data"].get("jid")
+                    )
+    except Exception as e:
+        print(f"[admin_set_instance_uazapi_token] get_status falhou (segue salvando): {e}")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, name, status, apikey, COALESCE(api_provider, 'megaapi') AS api_provider
+                FROM instances
+                WHERE id = %s AND user_id = %s
+                FOR UPDATE
+                """,
+                (instance_id, user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return {"error": "Instância não encontrada para este usuário."}, 404
+
+            if new_status:
+                cur.execute(
+                    """
+                    UPDATE instances
+                    SET apikey = %s,
+                        api_provider = 'uazapi',
+                        status = %s
+                    WHERE id = %s AND user_id = %s
+                    RETURNING id, name, status, apikey, COALESCE(api_provider, 'uazapi') AS api_provider
+                    """,
+                    (token, new_status, instance_id, user_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE instances
+                    SET apikey = %s,
+                        api_provider = 'uazapi'
+                    WHERE id = %s AND user_id = %s
+                    RETURNING id, name, status, apikey, COALESCE(api_provider, 'uazapi') AS api_provider
+                    """,
+                    (token, instance_id, user_id),
+                )
+            updated = cur.fetchone()
+        conn.commit()
+        return {
+            "success": True,
+            "instance": {
+                "id": updated["id"],
+                "name": updated["name"],
+                "status": updated["status"],
+                "apikey": updated["apikey"],
+                "api_provider": updated["api_provider"],
+            },
+            "remote_jid": remote_jid,
+            "status_checked": bool(new_status),
+        }
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao salvar token Uazapi instance={instance_id} user={user_id}: {e}")
+        return {"error": "Erro ao salvar token da instância."}, 500
+    finally:
+        conn.close()
+
+
 @app.route('/admin/whatsapp/check_status/<instance_apikey>', methods=['POST'])
 @login_required
 @admin_required
