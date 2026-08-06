@@ -621,6 +621,81 @@ def test_admin_edit_campaign_page_loads(
     print("✅ test_admin_edit_campaign_page_loads passed")
 
 
+def test_admin_link_unlink_campaign_instance(
+    db_conn, ensure_admin_user, ensure_target_user, ensure_instance
+):
+    """Admin pode vincular/desvincular instância Uazapi em campaign_instances."""
+    from psycopg2.extras import RealDictCursor
+    import secrets
+
+    admin_id = ensure_admin_user
+    target_user_id = ensure_target_user
+    instance_id = ensure_instance
+
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """INSERT INTO campaigns (user_id, name, message_template, status, created_at)
+               VALUES (%s, 'Link Instance Test', '["Hi"]', 'running', NOW())
+               RETURNING id""",
+            (target_user_id,),
+        )
+        campaign_id = cur.fetchone()["id"]
+        db_conn.commit()
+
+    from app import app
+
+    app.config["TESTING"] = True
+    app.config["LOGIN_DISABLED"] = True
+    csrf = secrets.token_urlsafe(16)
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["_user_id"] = str(admin_id)
+            sess["csrf_token"] = csrf
+
+        detail = client.get(f"/api/admin/campaigns/{campaign_id}/detail")
+        assert detail.status_code == 200, detail.get_data(as_text=True)
+        d = detail.get_json()
+        assert d["instances"] == []
+        assert any(int(i["id"]) == int(instance_id) for i in d["available_instances"])
+
+        link = client.post(
+            f"/api/admin/campaigns/{campaign_id}/instances",
+            data=json.dumps({"instance_id": instance_id}),
+            content_type="application/json",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert link.status_code == 200, link.get_data(as_text=True)
+        linked = link.get_json()
+        assert linked["success"] is True
+        assert any(int(i["id"]) == int(instance_id) for i in linked["instances"])
+
+        with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM campaign_instances WHERE campaign_id = %s AND instance_id = %s",
+                (campaign_id, instance_id),
+            )
+            assert cur.fetchone()["n"] == 1
+
+        unlink = client.delete(
+            f"/api/admin/campaigns/{campaign_id}/instances/{instance_id}",
+            data=json.dumps({}),
+            content_type="application/json",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert unlink.status_code == 200, unlink.get_data(as_text=True)
+        assert unlink.get_json()["instances"] == []
+
+        with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM campaign_instances WHERE campaign_id = %s",
+                (campaign_id,),
+            )
+            assert cur.fetchone()["n"] == 0
+
+    print(f"✅ test_admin_link_unlink_campaign_instance passed — campaign {campaign_id}")
+
+
 if __name__ == '__main__':
     test_admin_new_campaign_page_loads(None, None)
     print("Run with pytest for full integration tests.")

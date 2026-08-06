@@ -4145,7 +4145,9 @@ def admin_campaign_detail_api(campaign_id):
 
             cur.execute(
                 """
-                SELECT i.id, i.name, COALESCE(i.api_provider, '') AS api_provider
+                SELECT i.id, i.name, i.status,
+                       COALESCE(i.api_provider, '') AS api_provider,
+                       (i.apikey IS NOT NULL AND TRIM(i.apikey) <> '') AS has_apikey
                 FROM campaign_instances ci
                 JOIN instances i ON i.id = ci.instance_id
                 WHERE ci.campaign_id = %s
@@ -4154,6 +4156,20 @@ def admin_campaign_detail_api(campaign_id):
                 (campaign_id,),
             )
             instances = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT i.id, i.name, i.status,
+                       COALESCE(i.api_provider, 'megaapi') AS api_provider,
+                       (i.apikey IS NOT NULL AND TRIM(i.apikey) <> '') AS has_apikey
+                FROM instances i
+                WHERE i.user_id = %s
+                  AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                ORDER BY i.id
+                """,
+                (campaign["user_id"],),
+            )
+            available_instances = cur.fetchall()
 
             cur.execute(
                 """
@@ -4238,11 +4254,201 @@ def admin_campaign_detail_api(campaign_id):
             "campaign": c,
             "lead_status_counts": [dict(r) for r in lead_status_counts],
             "counts": dict(counts) if counts else {},
-            "instances": [dict(r) for r in instances],
+            "instances": [_admin_serialize_campaign_instance_row(r) for r in instances],
+            "available_instances": [
+                _admin_serialize_campaign_instance_row(r) for r in available_instances
+            ],
             "stage_sends": [serialize_row(dict(r)) for r in stage_sends],
             "steps": [serialize_row(dict(r)) for r in steps],
         }
     )
+
+
+def _admin_serialize_campaign_instance_row(row) -> dict:
+    d = dict(row)
+    d["has_apikey"] = bool(d.get("has_apikey"))
+    return d
+
+
+@app.route("/api/admin/campaigns/<int:campaign_id>/instances", methods=["POST"])
+@login_required
+@admin_required
+def admin_link_campaign_instance(campaign_id):
+    """
+    Vincula uma instância Uazapi do dono da campanha em ``campaign_instances``.
+    Body: ``{ "instance_id": int, "replace": bool? }`` — se ``replace``, remove vínculos atuais antes.
+    """
+    csrf_err = _verify_json_csrf()
+    if csrf_err:
+        return csrf_err
+
+    data = request.get_json(silent=True) or {}
+    try:
+        instance_id = int(data.get("instance_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Informe instance_id válido."}), 400
+    replace = bool(data.get("replace"))
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, name
+                FROM campaigns
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (campaign_id,),
+            )
+            campaign = cur.fetchone()
+            if not campaign:
+                conn.rollback()
+                return jsonify({"error": "Campanha não encontrada."}), 404
+
+            cur.execute(
+                """
+                SELECT id, name, status, user_id,
+                       COALESCE(api_provider, 'megaapi') AS api_provider,
+                       (apikey IS NOT NULL AND TRIM(apikey) <> '') AS has_apikey
+                FROM instances
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (instance_id,),
+            )
+            inst = cur.fetchone()
+            if not inst:
+                conn.rollback()
+                return jsonify({"error": "Instância não encontrada."}), 404
+            if int(inst["user_id"]) != int(campaign["user_id"]):
+                conn.rollback()
+                return jsonify(
+                    {"error": "A instância não pertence ao dono desta campanha."}
+                ), 400
+            if (inst.get("api_provider") or "").lower() != "uazapi":
+                conn.rollback()
+                return jsonify(
+                    {"error": "Só é possível vincular instâncias com api_provider=uazapi."}
+                ), 400
+
+            if replace:
+                cur.execute(
+                    "DELETE FROM campaign_instances WHERE campaign_id = %s",
+                    (campaign_id,),
+                )
+
+            cur.execute(
+                """
+                INSERT INTO campaign_instances (campaign_id, instance_id)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (campaign_id, instance_id),
+            )
+
+            cur.execute(
+                """
+                SELECT i.id, i.name, i.status,
+                       COALESCE(i.api_provider, '') AS api_provider,
+                       (i.apikey IS NOT NULL AND TRIM(i.apikey) <> '') AS has_apikey
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s
+                ORDER BY i.id
+                """,
+                (campaign_id,),
+            )
+            linked = [_admin_serialize_campaign_instance_row(r) for r in cur.fetchall()]
+        conn.commit()
+        warning = None
+        if not inst.get("has_apikey"):
+            warning = (
+                "Instância vinculada, mas sem token Uazapi. "
+                "Cole o token em Detalhes do Usuário antes do force chunk."
+            )
+        return jsonify(
+            {
+                "success": True,
+                "campaign_id": campaign_id,
+                "instance_id": instance_id,
+                "replaced": replace,
+                "instances": linked,
+                "warning": warning,
+            }
+        )
+    except Exception as e:
+        conn.rollback()
+        print(f"[admin_link_campaign_instance] campaign={campaign_id}: {e}")
+        return jsonify({"error": "Erro ao vincular instância."}), 500
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/api/admin/campaigns/<int:campaign_id>/instances/<int:instance_id>",
+    methods=["DELETE"],
+)
+@login_required
+@admin_required
+def admin_unlink_campaign_instance(campaign_id, instance_id):
+    """Remove o vínculo campanha↔instância em ``campaign_instances``."""
+    csrf_err = _verify_json_csrf()
+    if csrf_err:
+        return csrf_err
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id FROM campaigns WHERE id = %s FOR UPDATE",
+                (campaign_id,),
+            )
+            if not cur.fetchone():
+                conn.rollback()
+                return jsonify({"error": "Campanha não encontrada."}), 404
+
+            cur.execute(
+                """
+                DELETE FROM campaign_instances
+                WHERE campaign_id = %s AND instance_id = %s
+                RETURNING id
+                """,
+                (campaign_id, instance_id),
+            )
+            deleted = cur.fetchone()
+            if not deleted:
+                conn.rollback()
+                return jsonify({"error": "Vínculo não encontrado."}), 404
+
+            cur.execute(
+                """
+                SELECT i.id, i.name, i.status,
+                       COALESCE(i.api_provider, '') AS api_provider,
+                       (i.apikey IS NOT NULL AND TRIM(i.apikey) <> '') AS has_apikey
+                FROM campaign_instances ci
+                JOIN instances i ON i.id = ci.instance_id
+                WHERE ci.campaign_id = %s
+                ORDER BY i.id
+                """,
+                (campaign_id,),
+            )
+            linked = [_admin_serialize_campaign_instance_row(r) for r in cur.fetchall()]
+        conn.commit()
+        return jsonify(
+            {
+                "success": True,
+                "campaign_id": campaign_id,
+                "instance_id": instance_id,
+                "instances": linked,
+            }
+        )
+    except Exception as e:
+        conn.rollback()
+        print(f"[admin_unlink_campaign_instance] campaign={campaign_id}: {e}")
+        return jsonify({"error": "Erro ao desvincular instância."}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/api/admin/campaigns/<int:campaign_id>/outbox-state", methods=["GET"])

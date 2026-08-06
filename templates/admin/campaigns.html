@@ -793,6 +793,7 @@
         const c = data.campaign || {};
         const counts = data.counts || {};
         const inst = data.instances || [];
+        const available = data.available_instances || [];
         const stages = data.stage_sends || [];
         const steps = data.steps || [];
         const leadSt = data.lead_status_counts || [];
@@ -848,18 +849,51 @@
         }
         html += '</div>';
 
-        html += '<div><h3 class="text-ink font-semibold mb-2">Instâncias</h3>';
-        if (!inst.length) html += '<p class="text-faint">Nenhuma instância vinculada.</p>';
-        else {
-            html += '<table class="w-full text-left border border-[color:var(--card-border)] rounded overflow-hidden"><thead class="bg-slate-100 dark:bg-gray-800"><tr><th class="px-3 py-2 text-ink">ID</th><th class="px-3 py-2 text-ink">Nome</th><th class="px-3 py-2 text-ink">Provider</th></tr></thead><tbody>';
+        html += '<div><h3 class="text-ink font-semibold mb-2">Instâncias vinculadas</h3>';
+        if (!inst.length) {
+            html += '<p class="text-amber-700 dark:text-amber-300 mb-2">Nenhuma instância vinculada — isso causa <code>no_uazapi_instance</code> no force chunk.</p>';
+        } else {
+            html += '<table class="w-full text-left border border-[color:var(--card-border)] rounded overflow-hidden mb-3"><thead class="bg-slate-100 dark:bg-gray-800"><tr><th class="px-3 py-2 text-ink">ID</th><th class="px-3 py-2 text-ink">Nome</th><th class="px-3 py-2 text-ink">Status</th><th class="px-3 py-2 text-ink">Provider</th><th class="px-3 py-2 text-ink">Token</th><th class="px-3 py-2 text-ink"></th></tr></thead><tbody>';
             for (const r of inst) {
-                html += `<tr class="border-t border-[color:var(--card-border)]"><td class="px-3 py-1 text-ink">${esc(r.id)}</td><td class="px-3 py-1 text-ink">${esc(r.name)}</td><td class="px-3 py-1 text-ink">${esc(r.api_provider)}</td></tr>`;
+                const tokenLabel = r.has_apikey ? 'ok' : 'sem token';
+                const tokenClass = r.has_apikey ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+                html += `<tr class="border-t border-[color:var(--card-border)]">`
+                    + `<td class="px-3 py-1 text-ink">${esc(r.id)}</td>`
+                    + `<td class="px-3 py-1 text-ink">${esc(r.name)}</td>`
+                    + `<td class="px-3 py-1 text-ink">${esc(r.status || '—')}</td>`
+                    + `<td class="px-3 py-1 text-ink">${esc(r.api_provider)}</td>`
+                    + `<td class="px-3 py-1 ${tokenClass}">${tokenLabel}</td>`
+                    + `<td class="px-3 py-1 text-right"><button type="button" class="text-xs px-2 py-1 rounded border border-red-500/40 text-red-600 dark:text-red-400 hover:bg-red-500/10" onclick="unlinkCampaignInstance(${esc(c.id)}, ${esc(r.id)})">Desvincular</button></td>`
+                    + `</tr>`;
             }
             html += '</tbody></table>';
         }
-        html += '</div>';
+
+        const linkedIds = new Set(inst.map((r) => Number(r.id)));
+        const choices = (available || []).filter((r) => !linkedIds.has(Number(r.id)));
+        html += '<div class="border border-[color:var(--card-border)] rounded p-3 space-y-2 bg-slate-50/50 dark:bg-black/20">';
+        html += '<div class="text-ink font-medium text-sm">Vincular instância Uazapi do usuário</div>';
+        if (!available.length) {
+            html += '<p class="text-faint text-xs">Este usuário não tem instâncias Uazapi. Crie/cole o token em Detalhes do Usuário.</p>';
+        } else if (!choices.length) {
+            html += '<p class="text-faint text-xs">Todas as instâncias Uazapi do usuário já estão vinculadas.</p>';
+        } else {
+            html += '<div class="flex flex-wrap gap-2 items-center">';
+            html += `<select id="link-instance-select" class="flex-1 min-w-[12rem] bg-[color:var(--input-bg)] border border-[color:var(--input-border)] rounded text-ink px-2 py-1.5 text-xs">`;
+            for (const r of choices) {
+                const tokenHint = r.has_apikey ? '' : ' — SEM TOKEN';
+                html += `<option value="${esc(r.id)}">${esc(r.name)} (#${esc(r.id)}, ${esc(r.status || '?')})${tokenHint}</option>`;
+            }
+            html += '</select>';
+            html += `<button type="button" onclick="linkCampaignInstance(${esc(c.id)}, false)" class="px-3 py-1.5 text-xs rounded bg-blue-600/20 text-blue-700 dark:text-blue-300 border border-blue-500/30 hover:bg-blue-600/30">Vincular</button>`;
+            html += `<button type="button" onclick="linkCampaignInstance(${esc(c.id)}, true)" class="px-3 py-1.5 text-xs rounded bg-violet-600/20 text-violet-700 dark:text-violet-300 border border-violet-500/30 hover:bg-violet-600/30" title="Remove vínculos atuais e liga só esta">Substituir vínculo</button>`;
+            html += '</div>';
+        }
+        html += '<div id="link-instance-msg" class="hidden text-xs"></div>';
+        html += '</div></div>';
 
         html += '<div><h3 class="text-ink font-semibold mb-2">Etapas (cadência)</h3>';
+
         if (!steps.length) html += '<p class="text-faint">Nenhuma etapa cadastrada.</p>';
         else {
             html += '<table class="w-full text-left border border-[color:var(--card-border)] rounded overflow-hidden text-xs"><thead class="bg-slate-100 dark:bg-gray-800"><tr><th class="px-2 py-2 text-ink">#</th><th class="px-2 py-2 text-ink">Rótulo</th><th class="px-2 py-2 text-ink">Dias</th><th class="px-2 py-2 text-ink">Criada</th></tr></thead><tbody>';
@@ -882,6 +916,70 @@
         html += '</div>';
 
         return html;
+    }
+
+    function _setLinkInstanceMsg(text, ok) {
+        const el = document.getElementById('link-instance-msg');
+        if (!el) return;
+        el.classList.remove('hidden', 'text-faint', 'text-red-600', 'dark:text-red-400', 'text-green-600', 'dark:text-green-400', 'text-amber-700', 'dark:text-amber-300');
+        if (ok === true) el.classList.add('text-green-600', 'dark:text-green-400');
+        else if (ok === false) el.classList.add('text-red-600', 'dark:text-red-400');
+        else el.classList.add('text-amber-700', 'dark:text-amber-300');
+        el.textContent = text || '';
+    }
+
+    async function linkCampaignInstance(campaignId, replace) {
+        const sel = document.getElementById('link-instance-select');
+        if (!sel || !sel.value) {
+            alert('Selecione uma instância.');
+            return;
+        }
+        const instanceId = Number(sel.value);
+        if (replace && !confirm('Substituir todos os vínculos atuais por esta instância?')) {
+            return;
+        }
+        _setLinkInstanceMsg('Salvando…', null);
+        try {
+            const body = { instance_id: instanceId, replace: !!replace };
+            if (ADMIN_CSRF) body.csrf_token = ADMIN_CSRF;
+            const res = await fetch(`/api/admin/campaigns/${campaignId}/instances`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ADMIN_CSRF || '' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || data.message || ('HTTP ' + res.status));
+            }
+            await openCampaignDetail(campaignId);
+            if (data.warning) {
+                _setLinkInstanceMsg(data.warning, null);
+            } else {
+                _setLinkInstanceMsg('Instância vinculada.', true);
+            }
+        } catch (e) {
+            _setLinkInstanceMsg(e.message || 'Erro ao vincular', false);
+        }
+    }
+
+    async function unlinkCampaignInstance(campaignId, instanceId) {
+        if (!confirm(`Desvincular instância #${instanceId} desta campanha?`)) return;
+        try {
+            const body = {};
+            if (ADMIN_CSRF) body.csrf_token = ADMIN_CSRF;
+            const res = await fetch(`/api/admin/campaigns/${campaignId}/instances/${instanceId}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ADMIN_CSRF || '' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || data.message || ('HTTP ' + res.status));
+            }
+            await openCampaignDetail(campaignId);
+        } catch (e) {
+            alert(e.message || 'Erro ao desvincular');
+        }
     }
 
     async function deleteCampaign(id, name) {
