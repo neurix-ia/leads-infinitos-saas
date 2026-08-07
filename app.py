@@ -50,6 +50,7 @@ from functools import wraps
 from typing import Optional
 import pytz
 from utils.limits import (
+    CAMPAIGN_DAILY_LIMIT_MAX,
     INITIAL_CHUNK_ACTIVE_SEND_STATUSES,
     LEGACY_LICENSE_TYPE_FALLBACK,
     PLAN_POLICY,
@@ -5390,6 +5391,7 @@ def admin_new_campaign():
     return render_template(
         'admin/campaigns_new.html',
         plan_daily_limit=5,
+        campaign_daily_limit_max=CAMPAIGN_DAILY_LIMIT_MAX,
         use_message_outbox=USE_MESSAGE_OUTBOX,
         is_super_admin=is_super_admin(),
     )
@@ -6104,7 +6106,14 @@ def admin_users_list_api():
             users = cur.fetchall()
         conn.close()
         return json.dumps([
-            {'id': u['id'], 'email': u['email'], 'daily_limit': get_user_daily_limit(u['id'])}
+            {
+                'id': u['id'],
+                'email': u['email'],
+                'daily_limit': get_user_daily_limit(u['id']),
+                'campaign_daily_limit_max': _campaign_daily_limit_cap(
+                    get_user_daily_limit(u['id'])
+                ),
+            }
             for u in users
         ], default=str)
     except Exception as e:
@@ -6732,11 +6741,13 @@ def new_campaign():
     conn.close()
     
     plan_daily_limit = get_user_daily_limit(current_user.id)
-    
+    campaign_daily_limit_max = _campaign_daily_limit_cap(plan_daily_limit)
+
     return render_template('campaigns_new.html',
                            instances=user_instances,
                            is_super_admin=is_super_admin(),
                            plan_daily_limit=plan_daily_limit,
+                           campaign_daily_limit_max=campaign_daily_limit_max,
                            use_message_outbox=USE_MESSAGE_OUTBOX)
 
 @app.route('/api/scraping-jobs')
@@ -7658,9 +7669,14 @@ def _enqueue_uazapi_stage_outbox(
 _CAMPAIGN_DAILY_LIMIT_PACKAGES = (5, 10, 15, 20, 25, 30)
 
 
+def _campaign_daily_limit_cap(plan_limit: int) -> int:
+    """Teto efetivo por campanha: min(plano, CAMPAIGN_DAILY_LIMIT_MAX)."""
+    return max(5, min(int(plan_limit), int(CAMPAIGN_DAILY_LIMIT_MAX)))
+
+
 def _normalize_campaign_daily_limit(submitted, plan_limit: int) -> int:
-    """Pacotes {5..30 step 5}; clamp ao plano; mínimo 5."""
-    cap = max(5, int(plan_limit))
+    """Pacotes {5..30 step 5}; clamp ao teto por campanha (não ao plano Scale 60); mínimo 5."""
+    cap = _campaign_daily_limit_cap(plan_limit)
     allowed = [p for p in _CAMPAIGN_DAILY_LIMIT_PACKAGES if p <= cap]
     if not allowed:
         return 5

@@ -225,18 +225,18 @@
                     <label class="block text-sm font-semibold text-gray-300 mb-1">
                         📨 Mensagens por dia
                     </label>
-                    <p class="text-xs text-gray-500 mb-3">Quantas mensagens serão enviadas por dia. Limite máximo: <strong id="planDailyLimitLabel" class="text-blue-400">{{ plan_daily_limit }}</strong> (validado pelo plano do usuário).</p>
-                    <div class="flex items-center gap-4" id="dailyLimitCounter" data-min="5" data-max="{{ plan_daily_limit }}" data-step="5">
+                    <p class="text-xs text-gray-500 mb-3">Quantas mensagens serão enviadas por dia nesta campanha. Limite máximo por campanha: <strong id="planDailyLimitLabel" class="text-blue-400">{{ campaign_daily_limit_max }}</strong>.</p>
+                    <div class="flex items-center gap-4" id="dailyLimitCounter" data-min="5" data-max="{{ campaign_daily_limit_max }}" data-step="5" data-campaign-cap="{{ campaign_daily_limit_max }}">
                         <button type="button" id="dailyLimitDec"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(-1)">−</button>
-                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-white w-10 text-center">5</span>
+                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-white w-10 text-center">{{ campaign_daily_limit_max }}</span>
                         <button type="button" id="dailyLimitInc"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(1)">+</button>
                         <span class="text-xs text-gray-500">msgs/dia</span>
                     </div>
-                    <input type="hidden" id="daily_limit_value" value="5">
+                    <input type="hidden" id="daily_limit_value" value="{{ campaign_daily_limit_max }}">
                 </div>
 
                 <!-- [3] Seleção de Job OU Upload CSV -->
@@ -736,6 +736,9 @@
                 const opt = document.createElement('option');
                 opt.value = u.id;
                 opt.textContent = `${u.email} (ID: ${u.id})`;
+                if (u.campaign_daily_limit_max != null) {
+                    opt.dataset.campaignDailyLimitMax = u.campaign_daily_limit_max;
+                }
                 if (u.daily_limit != null) opt.dataset.dailyLimit = u.daily_limit;
                 select.appendChild(opt);
             });
@@ -758,8 +761,10 @@
         if (!userId) return;
 
         const selectedOpt = this.selectedOptions[0];
-        if (selectedOpt?.dataset?.dailyLimit) {
-            setPlanDailyLimit(selectedOpt.dataset.dailyLimit);
+        const campCap = selectedOpt?.dataset?.campaignDailyLimitMax
+            || selectedOpt?.dataset?.dailyLimit;
+        if (campCap) {
+            setPlanDailyLimit(campCap);
         }
 
         const instancesContainer = document.getElementById('instances-container');
@@ -982,12 +987,12 @@
         const hidden = document.getElementById('daily_limit_value');
         const min = parseInt(counter.dataset.min, 10);
         const step = parseInt(counter.dataset.step, 10);
-        const max = Math.max(min, parseInt(planLimit, 10) || min);
+        const hardCap = parseInt(counter.dataset.campaignCap, 10) || 30;
+        const max = Math.max(min, Math.min(hardCap, parseInt(planLimit, 10) || min));
         counter.dataset.max = max;
         const label = document.getElementById('planDailyLimitLabel');
         if (label) label.textContent = max;
-        let current = parseInt(hidden.value, 10);
-        if (isNaN(current)) current = min;
+        let current = max;
         current = Math.min(max, Math.max(min, current));
         current = Math.round((current - min) / step) * step + min;
         current = Math.min(max, Math.max(min, current));

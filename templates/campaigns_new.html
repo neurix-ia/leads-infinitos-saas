@@ -362,18 +362,18 @@
                     <label class="block text-sm font-semibold text-ink mb-1">
                         📨 Mensagens por dia
                     </label>
-                    <p class="text-xs text-faint mb-3">Quantas mensagens serão enviadas por dia nesta campanha. Máximo do seu plano: <strong class="text-blue-400">{{ plan_daily_limit }}</strong>.</p>
-                    <div class="flex items-center gap-4" id="dailyLimitCounter" data-min="5" data-max="{{ plan_daily_limit }}" data-step="5">
+                    <p class="text-xs text-faint mb-3">Quantas mensagens serão enviadas por dia nesta campanha. Máximo por campanha: <strong class="text-blue-400">{{ campaign_daily_limit_max }}</strong>{% if plan_daily_limit > campaign_daily_limit_max %} (plano {{ plan_daily_limit }}; várias campanhas somam){% endif %}.</p>
+                    <div class="flex items-center gap-4" id="dailyLimitCounter" data-min="5" data-max="{{ campaign_daily_limit_max }}" data-step="5">
                         <button type="button" id="dailyLimitDec"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(-1)">−</button>
-                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-ink w-10 text-center">5</span>
+                        <span id="dailyLimitDisplay" class="text-2xl font-bold text-ink w-10 text-center">{{ campaign_daily_limit_max }}</span>
                         <button type="button" id="dailyLimitInc"
                             class="w-9 h-9 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-400 font-bold text-lg flex items-center justify-center hover:bg-blue-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                             onclick="adjustDailyLimit(1)">+</button>
                         <span class="text-xs text-faint">msgs/dia</span>
                     </div>
-                    <input type="hidden" id="daily_limit_value" value="5">
+                    <input type="hidden" id="daily_limit_value" value="{{ campaign_daily_limit_max }}">
                 </div>
 
                 <!-- ============================================ -->

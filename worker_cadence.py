@@ -2068,7 +2068,7 @@ def process_cadence():
             if USE_MESSAGE_OUTBOX:
                 process_message_outbox_tick(conn)
                 maybe_schedule_outbox_initial_batches(conn)
-                # Fallback duro: 08:00–08:29 BRT force chunk se a fila ficou vazia
+                # Fallback: catch-up BRT (send_hour_start .. start+CATCHUP_HOURS) force chunk
                 maybe_auto_force_daily_initial_batches(conn)
 
             # Pré-disparo determinístico para agendamentos de etapa (2-5 min antes)

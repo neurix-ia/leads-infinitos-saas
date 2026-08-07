@@ -1320,38 +1320,156 @@ def _is_auto_force_catchup_window(camp: dict, now_brazil: datetime) -> bool:
     return sh <= int(now_brazil.hour) < end_h
 
 
+def _count_initial_outbox_sending(conn, campaign_id: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)::int AS n
+            FROM campaign_message_outbox
+            WHERE campaign_id = %s
+              AND LOWER(TRIM(stage)) = 'initial'
+              AND status = 'sending'
+            """,
+            (int(campaign_id),),
+        )
+        row = cur.fetchone()
+    return int((row[0] if row else 0) or 0)
+
+
+def recover_stale_initial_outbox_for_campaign(conn, campaign: dict) -> dict:
+    """
+    Pré-limpeza operacional antes de force chunk:
+    - ``pending`` / ``waiting_instance`` com ``next_run_at`` no passado → agora
+    - ``waiting_instance`` com instância Uazapi ligada → volta a ``pending``
+    """
+    cid = int(campaign["id"])
+    now_utc = datetime.utcnow()
+    recovered_due = 0
+    recovered_waiting = 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE campaign_message_outbox
+            SET next_run_at = %s, updated_at = NOW()
+            WHERE campaign_id = %s
+              AND LOWER(TRIM(stage)) = 'initial'
+              AND status IN ('pending', 'waiting_instance')
+              AND (next_run_at IS NULL OR next_run_at <= %s)
+            """,
+            (now_utc, cid, now_utc),
+        )
+        recovered_due = int(cur.rowcount or 0)
+
+        cur.execute(
+            """
+            UPDATE campaign_message_outbox o
+            SET status = 'pending',
+                next_run_at = %s,
+                updated_at = NOW()
+            WHERE o.campaign_id = %s
+              AND LOWER(TRIM(o.stage)) = 'initial'
+              AND o.status = 'waiting_instance'
+              AND EXISTS (
+                  SELECT 1
+                  FROM campaign_instances ci
+                  JOIN instances i ON i.id = ci.instance_id
+                  WHERE ci.campaign_id = o.campaign_id
+                    AND COALESCE(i.api_provider, 'megaapi') = 'uazapi'
+                    AND i.apikey IS NOT NULL
+                    AND TRIM(i.apikey) <> ''
+                    AND LOWER(COALESCE(i.status, '')) IN ('connected', 'open', 'online')
+              )
+            """,
+            (now_utc, cid),
+        )
+        recovered_waiting = int(cur.rowcount or 0)
+
+    if recovered_due or recovered_waiting:
+        try:
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        logger.info(
+            json.dumps(
+                {
+                    "event": "outbox_force_recover_stale",
+                    "campaign_id": cid,
+                    "recovered_due": recovered_due,
+                    "recovered_waiting": recovered_waiting,
+                },
+                ensure_ascii=False,
+            )
+        )
+    return {
+        "campaign_id": cid,
+        "recovered_due": recovered_due,
+        "recovered_waiting": recovered_waiting,
+    }
+
+
 def force_initial_outbox_batches_for_user(
-    conn, user_id: int, *, force: bool = True
+    conn,
+    user_id: Optional[int] = None,
+    *,
+    force: bool = True,
+    recover: bool = True,
 ) -> dict:
     """
-    Force chunk (schedule force=True) em todas as campanhas Uazapi running/pending
-    do utilizador com leads initial elegíveis. Usado pelo script ops e pelo auto-force.
+    Force chunk (schedule force=True) em campanhas Uazapi running/pending com leads
+    initial elegíveis. ``user_id=None`` = todos os utilizadores.
+
+    Com ``force=True`` e leads elegíveis sem outbox, enfileira mesmo se já houver
+    in-flight (evita travar o dia por fila primed/stale). ``recover`` reativa
+    pending vencidos / waiting_instance com instância ok antes do schedule.
     """
-    uid = int(user_id)
+    uid = int(user_id) if user_id is not None else None
     results = []
     total = 0
     for camp in _list_uazapi_campaigns_needing_initial(conn, user_id=uid):
         cid = int(camp["id"])
+        camp_uid = int(camp.get("user_id") or 0)
+        recover_info = None
+        if recover:
+            recover_info = recover_stale_initial_outbox_for_campaign(conn, camp)
+
         eligible = _count_eligible_pending_leads_without_initial_outbox(conn, cid)
         in_flight = _count_initial_outbox_in_flight(conn, cid)
+        sending = _count_initial_outbox_sending(conn, cid)
+        quota = initial_chunk_quota_snapshot(cid)
+        remaining_slots = int(quota.get("remaining_slots") or 0)
+        allows_more = bool(quota.get("allows_more")) and remaining_slots > 0
         entry = {
             "campaign_id": cid,
+            "user_id": camp_uid,
             "name": camp.get("name"),
             "eligible": eligible,
             "in_flight": in_flight,
+            "sending": sending,
+            "remaining_slots": remaining_slots,
             "rows_enqueued": 0,
             "reason": None,
+            "recover": recover_info,
         }
+        if not allows_more:
+            entry["reason"] = "daily_quota_exceeded"
+            results.append(entry)
+            continue
         if eligible <= 0:
             entry["reason"] = "no_eligible"
             results.append(entry)
             continue
-        if in_flight > 0 and not force:
+        if not force and in_flight > 0:
             entry["reason"] = "already_in_flight"
             results.append(entry)
             continue
-        # Com force=True ainda pulamos se já há fila — evita duplicar lote do dia.
-        if in_flight > 0:
+        # force=True: só bloqueia se está sending E não há elegíveis extras (já coberto
+        # acima) — se há elegíveis, schedule force bypassa reconcile e completa a cota.
+        if force and sending > 0 and eligible <= 0:
+            entry["reason"] = "already_sending"
+            results.append(entry)
+            continue
+        if force and in_flight >= remaining_slots and eligible <= 0:
             entry["reason"] = "already_in_flight"
             results.append(entry)
             continue
@@ -1374,10 +1492,24 @@ def force_initial_outbox_batches_for_user(
         results.append(entry)
         if n > 0:
             print(
-                f"  ⚡ [Force user={uid}] Campaign '{camp.get('name')}' id={cid}: "
+                f"  ⚡ [Force user={camp_uid}] Campaign '{camp.get('name')}' id={cid}: "
                 f"enfileirou {n}"
             )
-    return {"user_id": uid, "rows_enqueued": total, "campaigns": results}
+    return {
+        "user_id": uid,
+        "scope": "all_users" if uid is None else f"user:{uid}",
+        "rows_enqueued": total,
+        "campaigns": results,
+    }
+
+
+def force_initial_outbox_batches_for_all_users(
+    conn, *, force: bool = True, recover: bool = True
+) -> dict:
+    """Atalho: force chunk em todas as campanhas Uazapi elegíveis de todos os users."""
+    return force_initial_outbox_batches_for_user(
+        conn, user_id=None, force=force, recover=recover
+    )
 
 
 def maybe_auto_force_daily_initial_batches(
@@ -1385,11 +1517,11 @@ def maybe_auto_force_daily_initial_batches(
 ) -> int:
     """
     Fallback operacional: durante catch-up matinal BRT (default 6h após send_hour_start),
-    força ``schedule_next_initial_outbox_batch(..., force=True)`` se a fila initial
-    está vazia e há leads elegíveis.
+    força ``schedule_next_initial_outbox_batch(..., force=True)`` se há leads elegíveis
+    sem outbox (mesmo com in-flight parcial / primed).
 
-    Só marca o dia como concluído quando enfileirou, já há in-flight, não há elegíveis
-    ou a cota do dia esgotou — falhas transitórias re-tentam no próximo tick.
+    Só marca o dia como concluído quando enfileirou, não há elegíveis, a cota esgotou
+    ou a campanha não está ativa — falhas transitórias re-tentam no próximo tick.
     """
     if not USE_MESSAGE_OUTBOX:
         return 0
@@ -1415,28 +1547,30 @@ def maybe_auto_force_daily_initial_batches(
         if not _is_auto_force_catchup_window(camp, now_br):
             continue
 
-        in_flight = _count_initial_outbox_in_flight(conn, cid)
-        if in_flight > 0:
-            _AUTO_FORCE_DAILY_DONE.add(key)
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "outbox_auto_force_daily_skip",
-                        "campaign_id": cid,
-                        "reason": "already_in_flight",
-                        "in_flight": in_flight,
-                        "brt_date": today,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-            continue
+        recover_stale_initial_outbox_for_campaign(conn, camp)
 
         eligible = _count_eligible_pending_leads_without_initial_outbox(conn, cid)
+        in_flight = _count_initial_outbox_in_flight(conn, cid)
+
         if eligible <= 0:
+            # Fila já cobre o dia ou não há leads — não re-tenta o dia todo.
             _AUTO_FORCE_DAILY_DONE.add(key)
+            if in_flight > 0:
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "outbox_auto_force_daily_skip",
+                            "campaign_id": cid,
+                            "reason": "already_in_flight",
+                            "in_flight": in_flight,
+                            "brt_date": today,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
             continue
 
+        # Há elegíveis sem outbox: tenta force mesmo com in_flight (não marca done cedo).
         try:
             n, reason = schedule_next_initial_outbox_batch(conn, camp, force=True)
         except Exception:
@@ -1460,6 +1594,7 @@ def maybe_auto_force_daily_initial_batches(
                     "reason": reason,
                     "brt_date": today,
                     "eligible": eligible,
+                    "in_flight_before": in_flight,
                     "priority_user": int(camp.get("user_id") or 0)
                     in _AUTO_FORCE_PRIORITY_USER_IDS,
                 },

@@ -36,6 +36,10 @@ INITIAL_CHUNK_ACTIVE_SEND_STATUSES = (
 # Fonte única de regras de plano.
 # validity_days: dias até expiração (a partir da data de aplicação ao usuário).
 # starter_trial: 7 dias; 1 instância; 100 extrações/mês; 10 disparos/dia/instância; demais planos: 365 dias.
+# daily_sends_per_instance_default = teto do plano (ex.: Scale 60). Envio initial por campanha
+# continua limitado a CAMPAIGN_DAILY_LIMIT_MAX (30) via pacotes / campaigns.daily_limit (política g3).
+CAMPAIGN_DAILY_LIMIT_MAX = 30
+
 PLAN_POLICY = {
     "starter": {
         "instance_limit": 1,
@@ -61,7 +65,7 @@ PLAN_POLICY = {
     "scale": {
         "instance_limit": 4,
         "monthly_extraction_limit": 4000,
-        "daily_sends_per_instance_default": 30,
+        "daily_sends_per_instance_default": 60,
         "infinite_daily_options": (),
         "validity_days": 365,
     },
