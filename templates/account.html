@@ -120,9 +120,9 @@
                         <label class="block text-xs font-medium text-faint uppercase mb-2">Especificações</label>
                         <ul class="text-sm text-ink/90 space-y-1">
                             {% if license.license_type == 'infinite' %}
-                            <li>• Limite Diário por Instância: configurável (10 a 50)</li>
+                            <li>• Limite Diário por Instância: configurável (10, 20 ou 30)</li>
                             {% elif license.license_type == 'scale' %}
-                            <li>• Limite do plano: 60 envios/dia (até 30 por campanha)</li>
+                            <li>• Limite Diário por Campanha: 30 envios</li>
                             {% else %}
                             <li>• Limite Diário por Campanha: 30 envios</li>
                             {% endif %}

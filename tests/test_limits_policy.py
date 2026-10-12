@@ -1,7 +1,7 @@
-"""Política de planos: starter_trial + Scale 60 com teto por campanha 30."""
+"""Política de planos: starter_trial + teto global 30/dia e 2000 extrações/mês (decisão 2026-10-12)."""
 
 from utils.campaign_send_policy import initial_chunk_daily_quota_allows
-from utils.limits import CAMPAIGN_DAILY_LIMIT_MAX, get_plan_policy
+from utils.limits import CAMPAIGN_DAILY_LIMIT_MAX, MONTHLY_EXTRACTION_LIMIT_MAX, get_plan_policy
 
 
 def test_get_plan_policy_starter_trial_limits():
@@ -11,12 +11,20 @@ def test_get_plan_policy_starter_trial_limits():
     assert policy["daily_sends_per_instance_default"] == 10
 
 
-def test_get_plan_policy_scale_is_60():
+def test_get_plan_policy_scale_capped_at_30_and_2000():
     policy = get_plan_policy("scale")
     assert policy["instance_limit"] == 4
-    assert policy["monthly_extraction_limit"] == 4000
-    assert policy["daily_sends_per_instance_default"] == 60
+    assert policy["monthly_extraction_limit"] == 2000
+    assert policy["daily_sends_per_instance_default"] == 30
     assert CAMPAIGN_DAILY_LIMIT_MAX == 30
+
+
+def test_no_plan_exceeds_global_caps():
+    for plan in ("starter", "starter_trial", "pro", "scale", "infinite"):
+        policy = get_plan_policy(plan, allow_legacy_fallback=False)
+        assert policy["daily_sends_per_instance_default"] <= 30, plan
+        assert policy["monthly_extraction_limit"] <= MONTHLY_EXTRACTION_LIMIT_MAX, plan
+        assert all(opt <= 30 for opt in policy["infinite_daily_options"]), plan
 
 
 def test_g3_allows_two_campaigns_at_30_under_scale_plan():

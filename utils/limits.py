@@ -15,7 +15,8 @@ from utils.campaign_send_policy import (
     effective_initial_daily_caps,
     initial_chunk_daily_quota_allows,
 )
-INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30, 40, 50)
+# Decisão 2026-10-12: teto global de 30 disparos/dia em qualquer plano (ver docs/MAPA_SISTEMA.md).
+INFINITE_DAILY_SEND_OPTIONS = (10, 20, 30)
 
 # campaign_stage_sends (stage initial): só estes status bloqueiam novo chunk na mesma instância
 # (worker_cadence.schedule_next_initial_chunk, _continue_initial_chunk_core busy check).
@@ -36,9 +37,10 @@ INITIAL_CHUNK_ACTIVE_SEND_STATUSES = (
 # Fonte única de regras de plano.
 # validity_days: dias até expiração (a partir da data de aplicação ao usuário).
 # starter_trial: 7 dias; 1 instância; 100 extrações/mês; 10 disparos/dia/instância; demais planos: 365 dias.
-# daily_sends_per_instance_default = teto do plano (ex.: Scale 60). Envio initial por campanha
-# continua limitado a CAMPAIGN_DAILY_LIMIT_MAX (30) via pacotes / campaigns.daily_limit (política g3).
+# daily_sends_per_instance_default = teto do plano. Decisão 2026-10-12: 30/dia em todos os planos pagos
+# e no máximo 2000 extrações limpas/mês; CAMPAIGN_DAILY_LIMIT_MAX (30) continua sendo o teto por campanha.
 CAMPAIGN_DAILY_LIMIT_MAX = 30
+MONTHLY_EXTRACTION_LIMIT_MAX = 2000
 
 PLAN_POLICY = {
     "starter": {
@@ -64,14 +66,14 @@ PLAN_POLICY = {
     },
     "scale": {
         "instance_limit": 4,
-        "monthly_extraction_limit": 4000,
-        "daily_sends_per_instance_default": 60,
+        "monthly_extraction_limit": 2000,
+        "daily_sends_per_instance_default": 30,
         "infinite_daily_options": (),
         "validity_days": 365,
     },
     "infinite": {
         "instance_limit": 20,
-        "monthly_extraction_limit": 10000,
+        "monthly_extraction_limit": 2000,
         "daily_sends_per_instance_default": 30,
         "infinite_daily_options": INFINITE_DAILY_SEND_OPTIONS,
         "validity_days": 365,

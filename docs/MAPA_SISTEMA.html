@@ -1,0 +1,301 @@
+<title>Mapa Leads Infinitos</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: engineering map. Summary strip → pipeline → module bands (color = verdict) → motor history → conflicts → decision sheet. */
+:root {
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --fg: #1d1f22;
+  --muted: #676b73;
+  --line: #d9d6cd;
+  --accent: #0f766e;
+  --keep: #1f7a4d;
+  --keep-bg: #e3f3e9;
+  --rewrite: #b45309;
+  --rewrite-bg: #fbeedc;
+  --remove: #b42318;
+  --remove-bg: #fde3e0;
+  --decide: #475569;
+  --decide-bg: #e7eaef;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #15171a; --surface: #1e2126; --fg: #e8e6e0; --muted: #9a9ea8; --line: #30343b;
+  --accent: #2dd4bf;
+  --keep: #6ee7a0; --keep-bg: #16301f;
+  --rewrite: #fbbf24; --rewrite-bg: #3a2a0c;
+  --remove: #f87171; --remove-bg: #3d1816;
+  --decide: #cbd5e1; --decide-bg: #2a3038;
+  color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #15171a; --surface: #1e2126; --fg: #e8e6e0; --muted: #9a9ea8; --line: #30343b;
+  --accent: #2dd4bf;
+  --keep: #6ee7a0; --keep-bg: #16301f;
+  --rewrite: #fbbf24; --rewrite-bg: #3a2a0c;
+  --remove: #f87171; --remove-bg: #3d1816;
+  --decide: #cbd5e1; --decide-bg: #2a3038;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; margin: 0; padding-inline: 20px; padding-block: 32px 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 40px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 700; }
+h2 { font-size: 20px; font-weight: 600; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+h3 { font-size: 15px; font-weight: 600; }
+p { margin: 0; max-width: 70ch; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: 10px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 8px; }
+.stat { background: var(--surface); padding: 12px 14px; display: grid; gap: 2px; }
+.stat b { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 12px; color: var(--muted); }
+section { display: grid; gap: 16px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 13px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
+.legend .k::before { background: var(--keep); } .legend .r::before { background: var(--rewrite); } .legend .x::before { background: var(--remove); } .legend .d::before { background: var(--decide); }
+.pipe { overflow-x: auto; }
+.pipe svg { width: 100%; min-width: 760px; height: auto; display: block; }
+.band { display: grid; gap: 10px; }
+.band-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 12px; }
+.mod { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--decide); padding: 12px 14px; display: grid; gap: 6px; min-width: 0; }
+.mod[data-v="keep"] { border-left-color: var(--keep); }
+.mod[data-v="rewrite"] { border-left-color: var(--rewrite); }
+.mod[data-v="remove"] { border-left-color: var(--remove); }
+.mod .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.mod .code { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+.chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.chip.keep { color: var(--keep); background: var(--keep-bg); }
+.chip.rewrite { color: var(--rewrite); background: var(--rewrite-bg); }
+.chip.remove { color: var(--remove); background: var(--remove-bg); }
+.chip.decide { color: var(--decide); background: var(--decide-bg); }
+.mod ul { margin: 0; padding-left: 16px; font-size: 13px; color: var(--muted); }
+.mod .meta { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
+.gens { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.gen { background: var(--surface); border: 1px solid var(--line); padding: 14px; display: grid; gap: 8px; min-width: 0; }
+.gen .when { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+.gen .state { font-size: 12px; font-weight: 600; }
+pre.mermaid { background: var(--surface); border: 1px solid var(--line); padding: 12px; overflow-x: auto; margin: 0; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; background: var(--surface); }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.tbl { overflow-x: auto; border: 1px solid var(--line); }
+td.sev { white-space: nowrap; font-weight: 600; }
+.sev.alta { color: var(--remove); } .sev.media { color: var(--rewrite); } .sev.baixa { color: var(--muted); }
+.quota { display: grid; gap: 6px; }
+.qrow { display: grid; grid-template-columns: 190px 1fr; gap: 10px; align-items: center; font-size: 13px; }
+.qbar { height: 18px; background: var(--decide-bg); position: relative; }
+.qbar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); opacity: .75; }
+.qbar b { position: absolute; left: 6px; top: 0; font-size: 11px; line-height: 18px; font-family: var(--font-mono); font-weight: 500; color: var(--fg); }
+select { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 4px; }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.note { font-size: 13px; color: var(--muted); }
+@media (max-width: 600px) { .qrow { grid-template-columns: 1fr; gap: 4px; } }
+@media (prefers-reduced-motion: no-preference) { .mod { transition: transform .15s; } .mod:hover { transform: translateY(-1px); } }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">leads-infinitos-saas · main @ cd9bc14 · 2026-10-12</div>
+  <h1>Mapa do Leads Infinitos</h1>
+  <p class="muted">O que o app faz hoje, módulo a módulo, com a cor da minha sugestão (manter, reescrever, remover). Texto completo e índice de busca em <span class="mono">docs/MAPA_SISTEMA.md</span>.</p>
+  <div class="stats">
+    <div class="stat"><b>11.057</b><span>linhas em app.py</span></div>
+    <div class="stat"><b>~130</b><span>rotas Flask</span></div>
+    <div class="stat"><b>22</b><span>tabelas Postgres</span></div>
+    <div class="stat"><b>5</b><span>processos (compose)</span></div>
+    <div class="stat"><b>~45</b><span>feature flags de envio</span></div>
+    <div class="stat"><b>342</b><span>commits · ago/25 → ago/26</span></div>
+  </div>
+</header>
+
+<section>
+  <h2>Fluxo do produto</h2>
+  <div class="pipe">
+    <svg viewBox="0 0 980 170" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Pipeline: extração, campanha, motor de envio, cadência, kanban">
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
+      <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="13" fill="var(--fg)">
+        <rect x="10" y="40" width="170" height="70" rx="4" fill="var(--keep-bg)" stroke="var(--keep)" stroke-width="1.5"/>
+        <text x="95" y="66" text-anchor="middle" font-weight="600">M3 Extração</text>
+        <text x="95" y="86" text-anchor="middle" font-size="11.5" fill="var(--muted)">Apify → CSV/XLSX</text>
+        <text x="95" y="102" text-anchor="middle" font-size="11.5" fill="var(--muted)">até 500 × 15 cidades</text>
+
+        <rect x="210" y="40" width="170" height="70" rx="4" fill="var(--keep-bg)" stroke="var(--keep)" stroke-width="1.5"/>
+        <text x="295" y="66" text-anchor="middle" font-weight="600">M5 Campanha</text>
+        <text x="295" y="86" text-anchor="middle" font-size="11.5" fill="var(--muted)">upload CSV · wizard</text>
+        <text x="295" y="102" text-anchor="middle" font-size="11.5" fill="var(--muted)">4 etapas · instâncias</text>
+
+        <rect x="410" y="40" width="170" height="70" rx="4" fill="var(--remove-bg)" stroke="var(--remove)" stroke-width="1.5"/>
+        <text x="495" y="66" text-anchor="middle" font-weight="600">M6 Motor de envio</text>
+        <text x="495" y="86" text-anchor="middle" font-size="11.5" fill="var(--muted)">3 gerações · Uazapi</text>
+        <text x="495" y="102" text-anchor="middle" font-size="11.5" fill="var(--muted)">cotas · janelas · retry</text>
+
+        <rect x="610" y="40" width="170" height="70" rx="4" fill="var(--rewrite-bg)" stroke="var(--rewrite)" stroke-width="1.5"/>
+        <text x="695" y="66" text-anchor="middle" font-weight="600">M7 Cadência</text>
+        <text x="695" y="86" text-anchor="middle" font-size="11.5" fill="var(--muted)">FU1 → FU2 → Break-up</text>
+        <text x="695" y="102" text-anchor="middle" font-size="11.5" fill="var(--muted)">rollover · Chatwoot</text>
+
+        <rect x="810" y="40" width="160" height="70" rx="4" fill="var(--keep-bg)" stroke="var(--keep)" stroke-width="1.5"/>
+        <text x="890" y="66" text-anchor="middle" font-weight="600">M8 Kanban</text>
+        <text x="890" y="86" text-anchor="middle" font-size="11.5" fill="var(--muted)">6 colunas · drag</text>
+        <text x="890" y="102" text-anchor="middle" font-size="11.5" fill="var(--muted)">convertido / perdido</text>
+
+        <g stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#ar)">
+          <path d="M180 75H208"/><path d="M380 75H408"/><path d="M580 75H608"/><path d="M780 75H808"/>
+          <path d="M890 110V140H495V112" />
+        </g>
+        <text x="692" y="155" text-anchor="middle" font-size="11.5" fill="var(--muted)">Gerar / Forçar etapa a partir do kanban</text>
+        <text x="95" y="24" font-size="11.5" fill="var(--muted)">M1 Conta · M2 Licença gateiam tudo</text>
+        <text x="495" y="24" text-anchor="middle" font-size="11.5" fill="var(--muted)">M4 Instâncias WhatsApp alimentam M6 e M7</text>
+      </g>
+    </svg>
+  </div>
+  <div class="legend"><span class="k">Manter</span><span class="r">Reescrever</span><span class="x">Remover ou substituir</span><span class="d">Decidir</span></div>
+</section>
+
+<section>
+  <h2>Módulos</h2>
+
+  <div class="band">
+    <div class="band-head"><h3>Casca reaproveitável</h3><span class="note">Baixo acoplamento com o motor. Continua na próxima versão.</span></div>
+    <div class="grid">
+      <div class="mod" data-v="keep"><div class="top"><span class="code">M1</span><span class="chip keep">Manter</span></div><h3>Autenticação e Conta</h3><ul><li>registro, login, logout, esqueci/trocar senha</li><li>/account: dados, licença, instâncias, limite diário</li></ul><div class="meta"><span>10 rotas</span><span>users · password_resets</span></div></div>
+      <div class="mod" data-v="keep"><div class="top"><span class="code">M2</span><span class="chip keep">Manter</span></div><h3>Licenças e Planos</h3><ul><li>5 planos em PLAN_POLICY (trial 7d, starter, pro, scale, infinite)</li><li>webhooks Hotmart e Hubla, API de provisionamento, cron trial</li></ul><div class="meta"><span>9 rotas</span><span>licenses + 4 tabelas webhook</span></div></div>
+      <div class="mod" data-v="keep"><div class="top"><span class="code">M3</span><span class="chip keep">Manter</span></div><h3>Extração Google Maps</h3><ul><li>form → /scrape → RQ → worker_scraper → main.run_apify_scraper</li><li>cota mensal por plano, 1–500 resultados, 15 localizações</li><li><b>ponto de entrada da nova API Apify</b>: main.py:191</li></ul><div class="meta"><span>8 rotas</span><span>scraping_jobs · storage/</span></div></div>
+      <div class="mod" data-v="keep"><div class="top"><span class="code">M4</span><span class="chip keep">Manter</span></div><h3>Instâncias WhatsApp</h3><ul><li>criar, QR, status, excluir (Uazapi)</li><li>alertas de reconexão, limite diário por instância</li><li>limpar resíduo api_provider='megaapi'</li></ul><div class="meta"><span>9 rotas</span><span>instances + 3 tabelas</span></div></div>
+      <div class="mod" data-v="keep"><div class="top"><span class="code">M8</span><span class="chip keep">Manter UI</span></div><h3>Kanban</h3><ul><li>Inicial · FU1 · FU2 · Break-up · Convertido · Perdido</li><li>drag, notas, detalhe, gerar/forçar etapa, CSV remanescentes</li><li>estado do lead vem de 3 tabelas: precisa de fonte única</li></ul><div class="meta"><span>7 rotas</span><span>campaigns_kanban.html 1.426 l.</span></div></div>
+      <div class="mod" data-v="keep"><div class="top"><span class="code">M9</span><span class="chip keep">Manter</span></div><h3>Dashboard</h3><ul><li>leads/mês, enviados, taxa, campanhas ativas, negócios fechados</li><li>/healthz, /metrics Prometheus</li></ul><div class="meta"><span>4 rotas</span></div></div>
+      <div class="mod" data-v="keep"><div class="top"><span class="code">M11</span><span class="chip keep">Manter</span></div><h3>E-mail</h3><ul><li>SMTP Gmail via RQ, só reset de senha</li></ul><div class="meta"><span>worker_email.py 46 l.</span></div></div>
+    </div>
+  </div>
+
+  <div class="band">
+    <div class="band-head"><h3>Núcleo acoplado</h3><span class="note">UI boa, backend preso ao motor.</span></div>
+    <div class="grid">
+      <div class="mod" data-v="rewrite"><div class="top"><span class="code">M5</span><span class="chip rewrite">Manter UI · reescrever core</span></div><h3>Campanhas (CRUD + wizard)</h3><ul><li>wizard 1.704 l.: mensagem com variações, pacotes 5–30/dia, 4 etapas, instâncias, janela, delays, termos</li><li>upload/validação CSV, trocar lista, templates, copy via OpenAI</li><li>_create_campaign_core (~600 l.) decide outbox vs chunk por flag</li></ul><div class="meta"><span>15 rotas</span><span>campaigns (28 col.) · campaign_leads (27 col.) · campaign_steps</span></div></div>
+      <div class="mod" data-v="rewrite"><div class="top"><span class="code">M7</span><span class="chip rewrite">Reescrever</span></div><h3>Cadência e Follow-up</h3><ul><li>avanço por delay_days + snooze <b>e</b> por rollover em horário fixo (dois modelos ligados)</li><li>buffer de 5 min pós-envio, matriz de decisão Chatwoot (labels stop/lost)</li><li>horário 8–20 hardcoded vs janela da campanha</li></ul><div class="meta"><span>10 rotas</span><span>worker_cadence.py 3.589 l.</span></div></div>
+      <div class="mod" data-v="rewrite"><div class="top"><span class="code">M10</span><span class="chip rewrite">Manter users · remover ops</span></div><h3>Admin / Super admin</h3><ul><li>usuários, licenças, instâncias, token: fica</li><li>pausar/retomar outbox, forçar chunk, auditoria de disparos, snapshot, purge: morre com o motor</li><li>/migrate_* como rotas HTTP</li></ul><div class="meta"><span>~45 rotas</span></div></div>
+    </div>
+  </div>
+
+  <div class="band">
+    <div class="band-head"><h3>Motor de envio</h3><span class="note">~70% do código. Onde moram os bugs e as regras conflitantes.</span></div>
+    <div class="grid">
+      <div class="mod" data-v="remove"><div class="top"><span class="code">M6</span><span class="chip remove">Reescrever do zero ou terceirizar</span></div><h3>Motor de envio Uazapi</h3><ul><li>3 gerações no mesmo código (abaixo)</li><li>5 camadas de cota diária, 2 relógios de janela, 2 unidades de delay</li><li>reconciliação por 3 fontes, stale recovery, reaper, retry, auto-force, cron externo</li></ul><div class="meta"><span>~8.000 l.</span><span>worker_message_outbox · sync_uazapi · 10 utils</span></div></div>
+      <div class="mod" data-v="remove"><div class="top"><span class="code">M12</span><span class="chip remove">Arquivar</span></div><h3>Scripts de operação</h3><ul><li>22 scripts de diagnóstico e remediação do motor</li><li>cron force_outbox_chunks_for_user às 08:05</li></ul><div class="meta"><span>~3.000 l.</span></div></div>
+      <div class="mod" data-v="remove"><div class="top"><span class="code">—</span><span class="chip remove">Apagar</span></div><h3>Peso morto no repo</h3><ul><li>app.py.bak, app.py.backup, index.html.backup, cookies.txt, input.txt, env settings evolution.ini, openapi spec 450 KB</li><li>_bmad/ 657 arquivos, .cursor/commands 77, vídeos 6,8 MB</li><li>Dockerfile base Playwright sem uso</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Três gerações do envio inicial, todas no código</h2>
+  <div class="gens">
+    <div class="gen"><div class="when">G1 · jan/2026</div><h3>worker_sender + MegaAPI</h3><p class="muted">Envio 1 a 1 pelo worker local. MegaAPI removida em março.</p><div class="state" style="color: var(--remove)">Morto. O loop só faz sync de uso a cada 10 min, mas o container continua no compose.</div><div class="mono muted">campaign_leads.status</div></div>
+    <div class="gen"><div class="when">G2 · mar/2026</div><h3>Chunks (pastas Uazapi)</h3><p class="muted">create_advanced_campaign cria pasta com N leads; app reconcilia via list_folders / list_messages / message_find.</p><div class="state" style="color: var(--rewrite)">Legado ativo com USE_MESSAGE_OUTBOX=0. O kanban ainda lê stats daqui.</div><div class="mono muted">campaign_stage_sends · 8 status</div></div>
+    <div class="gen"><div class="when">G3 · jun–jul/2026</div><h3>Outbox (fila Postgres)</h3><p class="muted">1 linha por lead/etapa; worker faz claim → POST /send/text → grava tentativa. Chamado de dentro do worker_cadence.</p><div class="state" style="color: var(--keep)">Atual (default). Mas carrega as flags e caminhos de recuperação das anteriores.</div><div class="mono muted">campaign_message_outbox · campaign_send_attempts</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Cota diária: cinco regras sobrepostas</h2>
+  <p class="muted">Quantas mensagens iniciais uma campanha Scale com 1 instância pode mandar hoje, conforme cada regra olha o problema. Escala 0–60.</p>
+  <div class="quota">
+    <div class="qrow"><span>1 · Plano (por instância)</span><div class="qbar"><i style="width:100%"></i><b>60 · scale</b></div></div>
+    <div class="qrow"><span>2 · campaigns.daily_limit</span><div class="qbar"><i style="width:50%"></i><b>5–30 em pacotes de 5</b></div></div>
+    <div class="qrow"><span>3 · CAMPAIGN_DAILY_LIMIT_MAX</span><div class="qbar"><i style="width:50%"></i><b>30 · teto fixo</b></div></div>
+    <div class="qrow"><span>4 · Política g3 (default)</span><div class="qbar"><i style="width:50%"></i><b>usa só a campanha; ignora o plano</b></div></div>
+    <div class="qrow"><span>5 · Batch outbox × instâncias</span><div class="qbar"><i style="width:50%"></i><b>daily_limit × n_instâncias</b></div></div>
+    <div class="qrow"><span>+ Infinite por instância</span><div class="qbar"><i style="width:83%"></i><b>10–50, mas o teto 30 corta</b></div></div>
+  </div>
+  <p class="note">Resultado: o limite do plano nunca é alcançável por uma campanha só, e o valor "infinite 50" é aceito na tela e cortado no envio.</p>
+</section>
+
+<section>
+  <h2>Processos em produção</h2>
+  <pre class="mermaid">
+flowchart LR
+  UI[Browser] --> WEB[web · gunicorn 1 worker]
+  WEB --> PG[(Postgres)]
+  WEB --> RD[(Redis)]
+  RD --> RQ[worker · RQ]
+  RQ --> APIFY[Apify]
+  RQ --> SMTP[SMTP]
+  CAD[cadence · faz tudo] --> UAZ[Uazapi]
+  CAD --> CW[Chatwoot]
+  CAD --> PG
+  SND[sender · só sync 10min] --> UAZ
+  WEB --> OAI[OpenAI]
+  HUB[Hubla / Hotmart] --> WEB
+  MIG[migrate · 1x por deploy] --> PG
+  </pre>
+  <p class="note">worker_cadence é o único processo que envia mensagem (tick do outbox, chunks, rollover, Chatwoot, saúde das instâncias). Se cair, tudo para.</p>
+</section>
+
+<section>
+  <h2>Conflitos e bugs encontrados</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>#</th><th>Onde</th><th>Problema</th><th>Gravidade</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="mono">app.py:2733 / :8403</td><td>Rota /download duplicada; a segunda não checa dono do arquivo e serve qualquer path</td><td class="sev alta">Alta</td></tr>
+      <tr><td>2</td><td>M6</td><td>Três gerações de envio ligadas por USE_MESSAGE_OUTBOX e _campaign_has_message_outbox</td><td class="sev alta">Alta</td></tr>
+      <tr><td>3</td><td>M6 / M8</td><td>Kanban lê stats de campaign_stage_sends (G2) com outbox (G3) ligado</td><td class="sev media">Média</td></tr>
+      <tr><td>4</td><td class="mono">utils/limits.py, campaign_send_policy.py</td><td>Cinco camadas de cota; g3 ignora o plano; Scale 60 vs teto 30; Infinite 10–50 vs 30</td><td class="sev media">Média</td></tr>
+      <tr><td>5</td><td class="mono">worker_cadence.py:31 vs uazapi_pacing.py</td><td>Dois horários comerciais (8–20 fixo para follow-up, janela da campanha para inicial)</td><td class="sev media">Média</td></tr>
+      <tr><td>6</td><td class="mono">campaigns</td><td>delay_*_minutes (G2) e outbox_delay_*_seconds (G3) coexistem</td><td class="sev baixa">Baixa</td></tr>
+      <tr><td>7</td><td class="mono">instances.api_provider</td><td>Default 'megaapi' depois da remoção; COALESCE(...,'megaapi') em 10+ queries</td><td class="sev media">Média</td></tr>
+      <tr><td>8</td><td>compose</td><td>sender roda só para sync; cadence faz tudo e é ponto único</td><td class="sev media">Média</td></tr>
+      <tr><td>9</td><td>Dockerfile</td><td>Base Playwright + Chromium sem uso</td><td class="sev baixa">Baixa</td></tr>
+      <tr><td>10</td><td class="mono">utils/config.py</td><td>Super admin por e-mail hardcoded</td><td class="sev baixa">Baixa</td></tr>
+      <tr><td>11</td><td>M2</td><td>Hotmart e Hubla duplicados; fallback semestral/anual vivo</td><td class="sev baixa">Baixa</td></tr>
+      <tr><td>12</td><td>raiz</td><td>Backups, cookies.txt, ini da Evolution, spec 450 KB, migrate_*.py soltos</td><td class="sev baixa">Baixa</td></tr>
+      <tr><td>13</td><td class="mono">_bmad/ .cursor/</td><td>730+ arquivos de tooling de IA versionados com o produto</td><td class="sev baixa">Baixa</td></tr>
+      <tr><td>14</td><td>gunicorn</td><td>1 worker sync, timeout 600 s: um request lento trava o site</td><td class="sev media">Média</td></tr>
+      <tr><td>15</td><td class="mono">init_db()</td><td>Schema por 60+ ALTERs encadeados, sem versionamento</td><td class="sev media">Média</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>Folha de decisão</h2>
+  <p class="note">Sua escolha fica salva só neste navegador. Para registrar de verdade, preencha a coluna "Decisão" na tabela 6 do markdown.</p>
+  <div class="tbl"><table id="decisions">
+    <thead><tr><th>Módulo</th><th>Linhas</th><th>Acoplamento</th><th>Sugestão</th><th>Sua decisão</th></tr></thead>
+    <tbody>
+      <tr data-m="M1"><td>M1 Auth e Conta</td><td>~600</td><td>baixo</td><td><span class="chip keep">Manter</span></td><td></td></tr>
+      <tr data-m="M2"><td>M2 Licenças e Planos</td><td>~1.000</td><td>baixo</td><td><span class="chip keep">Manter</span>, escolher Hotmart ou Hubla</td><td></td></tr>
+      <tr data-m="M3"><td>M3 Extração Apify</td><td>~700</td><td>baixo</td><td><span class="chip keep">Manter</span>, trocar run_apify_scraper</td><td></td></tr>
+      <tr data-m="M4"><td>M4 Instâncias Uazapi</td><td>~500</td><td>médio</td><td><span class="chip keep">Manter</span>, limpar api_provider</td><td></td></tr>
+      <tr data-m="M5"><td>M5 Campanhas CRUD</td><td>~2.000</td><td>alto (M6)</td><td><span class="chip rewrite">Manter UI, core fino</span></td><td></td></tr>
+      <tr data-m="M6"><td>M6 Motor de envio</td><td>~8.000</td><td>altíssimo</td><td><span class="chip remove">Reescrever ou n8n</span></td><td></td></tr>
+      <tr data-m="M7"><td>M7 Cadência</td><td>~2.500</td><td>alto (M6)</td><td><span class="chip rewrite">Reescrever, um modelo só</span></td><td></td></tr>
+      <tr data-m="M8"><td>M8 Kanban</td><td>~1.500</td><td>médio</td><td><span class="chip keep">Manter UI</span>, fonte única</td><td></td></tr>
+      <tr data-m="M9"><td>M9 Dashboard</td><td>~200</td><td>baixo</td><td><span class="chip keep">Manter</span></td><td></td></tr>
+      <tr data-m="M10"><td>M10 Admin</td><td>~2.500</td><td>alto (M6)</td><td><span class="chip rewrite">Users fica, ops sai</span></td><td></td></tr>
+      <tr data-m="M11"><td>M11 E-mail</td><td>~50</td><td>baixo</td><td><span class="chip keep">Manter</span></td><td></td></tr>
+      <tr data-m="M12"><td>M12 Scripts</td><td>~3.000</td><td>alto (M6)</td><td><span class="chip remove">Arquivar</span></td><td></td></tr>
+    </tbody>
+  </table></div>
+</section>
+</div>
+
+<script>
+(function () {
+  var opts = ['', 'Manter', 'Reescrever', 'Remover', 'Decidir depois'];
+  var rows = document.querySelectorAll('#decisions tbody tr');
+  rows.forEach(function (tr) {
+    var key = 'li-decision-' + tr.getAttribute('data-m');
+    var sel = document.createElement('select');
+    sel.id = key;
+    opts.forEach(function (o) { var op = document.createElement('option'); op.value = o; op.textContent = o || '—'; sel.appendChild(op); });
+    try { var saved = localStorage.getItem(key); if (saved) sel.value = saved; } catch (e) {}
+    sel.addEventListener('change', function () { try { localStorage.setItem(key, sel.value); } catch (e) {} });
+    tr.lastElementChild.appendChild(sel);
+  });
+})();
+</script>
