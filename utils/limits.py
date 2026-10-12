@@ -148,7 +148,8 @@ def get_user_daily_limit(user_id: int, instance_id: int = None) -> int:
     """
     Obtém a cota diária por instância para o usuário.
     Valor padrão definido por plano em PLAN_POLICY['daily_sends_per_instance_default'].
-    Infinite pode sobrescrever por instância: 10/20/30/40/50.
+    Infinite pode sobrescrever por instância: 10/20/30. Valores antigos (40/50) gravados na BD
+    caem no default do plano (30) porque não estão em INFINITE_DAILY_SEND_OPTIONS.
     """
     conn = get_db_connection()
     try:
