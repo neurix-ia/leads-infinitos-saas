@@ -61,8 +61,8 @@ Resultado: um único disparador em produção (o que já roda para o CRM), dois 
 
 ## 5. Ordem sugerida
 
-1. Agora: Apify novo (`main.py:191`), sem tocar em envio.
-2. Rotacionar a API key do CRM e parametrizar `crm_base_url` no workflow (ganho imediato para o CRM também).
+1. ~~Agora: Apify novo (`main.py:191`), sem tocar em envio.~~ Feito 2026-10-12 (token novo validado, caps 30/dia e 2000/mês).
+2. ~~Parametrizar `crm_base_url` no workflow.~~ Feito 2026-10-12: workflow `pL8e4ydG1TvjkatU` versão publicada monta as 4 URLs a partir de `body.crm_base_url` (fallback `https://crm.wbtech.dev`) e autentica só pela credencial n8n `CRM API Key` (header hardcoded removido dos nós). Verificado com execução manual: 404 "Campanha não encontrada" (auth ok). Rotação da key: trocar `N8N_API_KEY` no Dokploy do CRM e o valor da credencial `CRM API Key` no n8n, nada mais.
 3. Prototipar os 4 endpoints no LI atrás de flag, testar com uma campanha de 1 etapa.
 4. Cadência (etapas 2–4) via scheduler + webhook Uazapi.
 5. Remover M6 legado, tabelas e ~40 flags.
