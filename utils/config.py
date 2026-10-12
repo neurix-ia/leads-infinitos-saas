@@ -34,6 +34,19 @@ USE_MESSAGE_OUTBOX = _env_bool("USE_MESSAGE_OUTBOX", True)
 # continuam restritas a ``SUPER_ADMIN_EMAILS``. ``campaigns.created_by_admin_id`` é só auditoria
 # (painel admin); não define modo de envio.
 
+# --- Disparo via n8n (passo 3 de docs/INTEGRACAO_CRM_N8N.md) ---
+# ``USE_N8N_DISPATCH``: regista as rotas /api/n8n/tools/* e POST /api/campaigns/<id>/n8n-dispatch/<step>.
+# O envio em si é o workflow "Disparador CRM Simple" do n8n, o mesmo do CRM Neurix.
+USE_N8N_DISPATCH = _env_bool("USE_N8N_DISPATCH", False)
+N8N_DISPATCH_WEBHOOK_URL = (
+    os.environ.get("N8N_DISPATCH_WEBHOOK_URL")
+    or "https://n8n-neurix-1.wbtech.dev/webhook/disparador-crm-start"
+).strip()
+# Secret do header X-CRM-API-Key que o n8n manda de volta (credencial "CRM API Key" no n8n).
+N8N_DISPATCH_API_KEY = (os.environ.get("N8N_DISPATCH_API_KEY") or "").strip()
+# URL pública deste app; vai em ``crm_base_url`` para o n8n saber onde fazer o callback.
+PUBLIC_BASE_URL = (os.environ.get("PUBLIC_BASE_URL") or "").strip()
+
 # --- Task 14 / observabilidade ops (Prometheus) ---
 # ``EXPOSE_PROMETHEUS_METRICS``: expõe ``GET /metrics`` no processo Flask (default off).
 EXPOSE_PROMETHEUS_METRICS = _env_bool("EXPOSE_PROMETHEUS_METRICS", False)

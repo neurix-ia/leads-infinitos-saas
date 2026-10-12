@@ -993,6 +993,10 @@ def _init_db_body() -> None:
             """
         )
 
+        # Disparo via n8n: campaign_dispatches + campaign_sends (docs/INTEGRACAO_CRM_N8N.md)
+        from n8n_dispatch import ensure_schema as _ensure_n8n_dispatch_schema
+        _ensure_n8n_dispatch_schema(cur)
+
         # Pausa sistema vs utilizador (desconexão Uazapi — tech-spec desconexao-whatsapp)
         cur.execute(
             """
@@ -2302,6 +2306,13 @@ mail = Mail(app)
 login_manager = LoginManager()
 login_manager.login_view = "login"
 login_manager.init_app(app)
+
+# Disparo via n8n (USE_N8N_DISPATCH=1): rotas /api/n8n/tools/* + /api/campaigns/<id>/n8n-dispatch/<step>
+from utils.config import USE_N8N_DISPATCH as _USE_N8N_DISPATCH
+if _USE_N8N_DISPATCH:
+    import n8n_dispatch as _n8n_dispatch
+    _n8n_dispatch.configure(get_db_connection)
+    app.register_blueprint(_n8n_dispatch.n8n_dispatch_bp)
 
 
 @app.before_request

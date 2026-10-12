@@ -63,6 +63,11 @@ Resultado: um único disparador em produção (o que já roda para o CRM), dois 
 
 1. ~~Agora: Apify novo (`main.py:191`), sem tocar em envio.~~ Feito 2026-10-12 (token novo validado, caps 30/dia e 2000/mês).
 2. ~~Parametrizar `crm_base_url` no workflow.~~ Feito 2026-10-12: workflow `pL8e4ydG1TvjkatU` versão publicada monta as 4 URLs a partir de `body.crm_base_url` (fallback `https://crm.wbtech.dev`) e autentica só pela credencial n8n `CRM API Key` (header hardcoded removido dos nós). Verificado com execução manual: 404 "Campanha não encontrada" (auth ok). Rotação da key: trocar `N8N_API_KEY` no Dokploy do CRM e o valor da credencial `CRM API Key` no n8n, nada mais.
-3. Prototipar os 4 endpoints no LI atrás de flag, testar com uma campanha de 1 etapa.
+3. ~~Prototipar os 4 endpoints no LI atrás de flag.~~ Feito 2026-10-12, falta o teste real com uma campanha:
+   - Código: `n8n_dispatch.py` (blueprint), `utils/n8n_dispatch_gate.py` (regras puras), schema em `init_db` (`campaign_dispatches`, `campaign_sends`), testes em `tests/test_n8n_dispatch.py`.
+   - Ligar: `USE_N8N_DISPATCH=1`, `N8N_DISPATCH_API_KEY=<mesmo valor da credencial "CRM API Key" do n8n>`, `PUBLIC_BASE_URL=<URL pública do LI>` no Dokploy (web). O workflow do n8n não muda: ele lê `crm_base_url` do payload e usa a credencial que já tem.
+   - Disparar uma etapa: `POST /api/campaigns/<id>/n8n-dispatch/<step>` (logado, dono da campanha). Cria `campaign_dispatches` + um `campaign_sends` por lead (mensagem sorteada, instância por round-robin se `rotation_mode='round_robin'`) e chama o webhook.
+   - Regras aplicadas em `dispatch-targets`: campanha pausada → recheck em 5 min; fora da janela (`send_hour_*`, sáb/dom) → espera até abrir; cota = `min(daily_limit, 30)` por campanha somando todas as etapas, contada em BRT → espera o dia seguinte.
+   - Callback `dispatch-target-status` atualiza `campaign_leads` (`status`, `current_step`, `last_sent_stage`, `last_sent_instance_id`), então o kanban já reflete.
 4. Cadência (etapas 2–4) via scheduler + webhook Uazapi.
 5. Remover M6 legado, tabelas e ~40 flags.
