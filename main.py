@@ -1,3 +1,4 @@
+import traceback
 import datetime
 
 from dataclasses import dataclass, asdict, field
@@ -198,8 +199,9 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
         raise ValueError("APIFY_TOKEN not found in environment variables")
         
     client = ApifyClient(apify_token)
-    
+
     results = []
+    errors = []
     
     for i, search_item in enumerate(search_list):
         # Determine if input is simple string or structured dict
@@ -297,9 +299,14 @@ def run_apify_scraper(search_list, total, save_base_dir, progress_callback=None)
             })
             
         except Exception as e:
-            print(f"Apify Actor Failed for {search_term}: {e}")
+            # Antes aqui havia ``search_term`` (nome inexistente): o NameError escondia o erro real do Apify.
+            print(f"Apify Actor Failed for {search_term_display}: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            errors.append(f"{search_term_display}: {type(e).__name__}: {e}")
             # Continue to next search term
-    
+
+    if errors and not results:
+        raise RuntimeError("Apify falhou em todas as buscas: " + " | ".join(errors)[:1500])
     return results
 
 
